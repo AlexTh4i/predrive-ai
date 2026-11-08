@@ -1,0 +1,132 @@
+@import '@fontsource/be-vietnam-pro/400.css';
+@import '@fontsource/be-vietnam-pro/500.css';
+@import '@fontsource/be-vietnam-pro/600.css';
+@import '@fontsource/be-vietnam-pro/700.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --grab-green: #00B14F;
+  --grab-green-pressed: #009A44;
+  --grab-green-tint: #E5F7ED;
+  --grab-ink: #1C1C1C;
+  --grab-ink-2: #5E6366;
+  --grab-line: #E8E8E8;
+  --grab-red: #E5372B;
+}
+
+body {
+  margin: 0;
+  background-color: #111315;
+  color: #1C1C1C;
+  font-family: 'Be Vietnam Pro', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow: hidden;
+}
+
+.grab-scope {
+  font-family: 'Be Vietnam Pro', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+.grab-shadow {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12), 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+.grab-sheet-shadow {
+  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.10);
+}
+
+@keyframes peek-blink {
+  0%, 92%, 100% { transform: scaleY(1); }
+  96% { transform: scaleY(0.1); }
+}
+
+@keyframes comb-wiggle {
+  0%, 100% { transform: rotate(0deg); }
+  50% { transform: rotate(-6deg); }
+}
+
+@keyframes wave-out {
+  0% { opacity: 0; transform: translateX(6px); }
+  40% { opacity: 1; }
+  100% { opacity: 0; transform: translateX(-10px); }
+}
+
+@keyframes screen-danger {
+  0%, 100% { box-shadow: inset 0 0 0 5px #E5372B, inset 0 0 40px rgba(229, 55, 43, 0.55); }
+  50% { box-shadow: inset 0 0 0 10px #F05A4F, inset 0 0 80px rgba(229, 55, 43, 0.85); }
+}
+
+@keyframes bubble-in {
+  0% { transform: scale(0.85) translateY(-8px); opacity: 0; }
+  100% { transform: scale(1) translateY(0); opacity: 1; }
+}
+
+@keyframes flip-cam {
+  0% { transform: scaleX(1); opacity: 1; }
+  50% { transform: scaleX(0.02); opacity: 0.4; }
+  100% { transform: scaleX(1); opacity: 1; }
+}
+
+@keyframes bell-shake {
+  0%, 100% { transform: rotate(0deg); }
+  20% { transform: rotate(-4deg); }
+  40% { transform: rotate(4deg); }
+  60% { transform: rotate(-3deg); }
+  80% { transform: rotate(3deg); }
+}
+
+.bell-shake {
+  transform-origin: 60% 80%;
+  animation: bell-shake 0.32s infinite ease-in-out;
+}
+
+.eye-blink {
+  transform-origin: center;
+  transform-box: fill-box;
+  animation: peek-blink 3.5s infinite ease-in-out;
+}
+
+.comb-anim {
+  transform-origin: 92px 50px;
+  animation: comb-wiggle 1.6s infinite ease-in-out;
+}
+
+.wave {
+  animation: wave-out 0.6s infinite ease-out;
+}
+
+.wave-2 {
+  animation-delay: 0.15s;
+}
+
+.danger-border {
+  animation: screen-danger 0.65s infinite ease-in-out;
+}
+
+.bubble-pop {
+  animation: bubble-in 0.22s ease-out;
+}
+
+.cam-flipping {
+  animation: flip-cam 0.36s ease-in-out;
+}
+
+.smooth {
+  transition: all 320ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bell-shake,
+  .eye-blink,
+  .comb-anim,
+  .wave,
+  .danger-border,
+  .bubble-pop,
+  .cam-flipping {
+    animation: none !important;
+  }
+}

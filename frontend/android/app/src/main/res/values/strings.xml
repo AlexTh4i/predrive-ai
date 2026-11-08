@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">PreDrive AI</string>
+    <string name="title_activity_main">PreDrive AI</string>
+    <string name="package_name">com.predrive.ai</string>
+    <string name="custom_url_scheme">com.predrive.ai</string>
+</resources>

@@ -1,0 +1,45 @@
+# --- Môi trường & công cụ build cục bộ (rất nặng, mỗi máy tự cài) ---
+venv/
+.venv/
+tools/
+node_modules/
+
+# --- Python ---
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# --- Frontend build output ---
+frontend/dist/
+frontend/dev-dist/
+# Asset AI được sinh tự động bởi scripts/copy-ai-assets.mjs
+frontend/public/mediapipe/
+frontend/public/models/
+
+# --- Android build ---
+frontend/android/.gradle/
+frontend/android/build/
+frontend/android/app/build/
+frontend/android/local.properties
+frontend/android/app/src/main/assets/public/
+*.apk
+*.aab
+*.keystore
+*.jks
+
+# --- Bí mật ---
+.env
+.env.*
+!.env.example
+
+# --- Thư mục cũ / tạm ---
+temp_backend/
+temp_old_project/
+PREDRIVE-AI_Frontend_Kenneth_v0.1/
+*.zip
+
+# --- IDE / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

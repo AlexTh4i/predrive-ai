@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <rect width="512" height="512" rx="128" fill="#0B0F19"/>
+  <!-- Circular radar / steering wheel rim -->
+  <circle cx="256" cy="256" r="180" stroke="#1F2E47" stroke-width="16"/>
+  <circle cx="256" cy="256" r="180" stroke="#00E5FF" stroke-width="8" stroke-dasharray="80 30" stroke-linecap="round"/>
+  <!-- AI Eye / Lens -->
+  <path d="M128 256C160 196 208 160 256 160C304 160 352 196 384 256C352 316 304 352 256 352C208 352 160 316 128 256Z" stroke="#38BDF8" stroke-width="18" stroke-linejoin="round"/>
+  <!-- Iris and Pupil -->
+  <circle cx="256" cy="256" r="54" fill="#161F30" stroke="#00E5FF" stroke-width="12"/>
+  <circle cx="256" cy="256" r="22" fill="#00E5FF"/>
+  <!-- Steering wheel spokes -->
+  <line x1="76" y1="256" x2="160" y2="256" stroke="#00E5FF" stroke-width="12" stroke-linecap="round"/>
+  <line x1="352" y1="256" x2="436" y2="256" stroke="#00E5FF" stroke-width="12" stroke-linecap="round"/>
+  <line x1="256" y1="352" x2="256" y2="436" stroke="#00E5FF" stroke-width="12" stroke-linecap="round"/>
+</svg>
+
