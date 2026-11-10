@@ -6,7 +6,11 @@ import { useDriverAI } from '../../hooks/useDriverAI';
 import { useBellAlarm } from '../../hooks/useBellAlarm';
 import { useWakeLock } from '../../hooks/useWakeLock';
 
-export function DriverScreen() {
+export interface DriverScreenProps {
+  onOpenAdmin?: () => void;
+}
+
+export function DriverScreen({ onOpenAdmin }: DriverScreenProps = {}) {
   const [isMonitoring, setIsMonitoring] = useState(false);
 
   const {
@@ -195,8 +199,20 @@ export function DriverScreen() {
           </span>
         </div>
 
-        <div className="inline-flex items-center h-8 px-3 rounded-full bg-black/45 backdrop-blur-sm text-white text-xs font-medium">
-          {facing === 'user' ? 'Camera trước' : 'Camera sau'}
+        <div className="flex items-center gap-2">
+          {onOpenAdmin && (
+            <button
+              type="button"
+              onClick={onOpenAdmin}
+              className="inline-flex items-center h-8 px-3 rounded-full bg-slate-900/80 hover:bg-slate-800 border border-cyan-500/40 text-cyan-400 text-xs font-semibold shadow-sm transition-colors cursor-pointer"
+              title="Vào giao diện Quản trị viên (Admin)"
+            >
+              Quản trị
+            </button>
+          )}
+          <div className="inline-flex items-center h-8 px-3 rounded-full bg-black/45 backdrop-blur-sm text-white text-xs font-medium">
+            {facing === 'user' ? 'Camera trước' : 'Camera sau'}
+          </div>
         </div>
       </div>
 

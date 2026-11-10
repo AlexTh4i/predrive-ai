@@ -56,3 +56,4 @@ class AnalysisResult(BaseModel):
     image_quality: ImageQuality = "UNKNOWN"
     risk_score: Optional[float] = None
     processing_ms: int = Field(ge=0)
+

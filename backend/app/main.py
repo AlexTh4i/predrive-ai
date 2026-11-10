@@ -1,13 +1,14 @@
 import asyncio
 import base64
 import binascii
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
+from io import BytesIO
 import logging
 import os
 import sys
 import time
-from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
-from io import BytesIO
+from typing import Any
 from uuid import UUID, uuid4
 
 import cv2
@@ -16,6 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import numpy as np
 from PIL import Image, UnidentifiedImageError
 from pydantic import ValidationError
+from sqlalchemy import select
 
 # Đảm bảo đường dẫn gốc chứa module ai/
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -23,7 +25,16 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 from ai import DriverMonitorAI
+from .core import database as db_mod
+from .core.config import get_config
+from .core.errors import register_error_handlers
+from .models.models import Organization
+from .routers import auth as auth_router
+from .routers import driver_app as driver_app_router
+from .routers import web_admin as web_admin_router
 from .schemas import AnalysisResult, FrameMessage, SessionResponse
+from .services.seed import seed_database
+from .services.watchdog import watchdog_loop
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("predrive.backend")
@@ -49,39 +60,11 @@ SESSION_TTL = setting("PREDRIVE_SESSION_TTL_SECONDS", 3600)
 sessions: dict[UUID, datetime] = {}
 active_sessions: set[UUID] = set()
 
-# Khởi tạo instance AI phân tích giám sát
-ai_analyzer: DriverMonitorAI = None
+# Khởi tạo instance AI phân tích giám sát (dùng cho legacy WebSocket M1/M2)
+ai_analyzer: DriverMonitorAI | None = None
 
 
-@asynccontextmanager
-async def lifespan(_: FastAPI):
-    global ai_analyzer
-    logger.info("Đang khởi tạo AI Model...")
-    ai_analyzer = DriverMonitorAI()
-    logger.info("AI Model đã sẵn sàng!")
-    yield
-    sessions.clear()
-    active_sessions.clear()
-
-
-app = FastAPI(title="PREDRIVE AI Gateway", version="0.1.0", lifespan=lifespan)
-origins = [o.strip() for o in os.getenv("PREDRIVE_ALLOWED_ORIGINS", "http://localhost:5173").split(",") if o.strip()]
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=False,
-    allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type"],
-)
-
-
-@app.get("/health")
-async def health() -> dict[str, str]:
-    return {"status": "ok", "service": "predrive-backend", "version": "0.1.0"}
-
-
-@app.post("/api/v1/sessions", response_model=SessionResponse, status_code=201)
-async def create_session() -> SessionResponse:
+def _create_legacy_ws_session() -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     if len(sessions) >= MAX_SESSIONS:
         expired = [sid for sid, expires in sessions.items() if expires <= now]
@@ -92,11 +75,87 @@ async def create_session() -> SessionResponse:
     session_id = uuid4()
     expires_at = now + timedelta(seconds=SESSION_TTL)
     sessions[session_id] = expires_at
-    return SessionResponse(session_id=session_id, created_at=now, expires_at=expires_at)
+    resp = SessionResponse(session_id=session_id, created_at=now, expires_at=expires_at)
+    return resp.model_dump(mode="json")
+
+
+driver_app_router.set_legacy_session_creator(_create_legacy_ws_session)
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    global ai_analyzer
+    # 1. Initialize database schema & seed if empty
+    db_mod.Base.metadata.create_all(bind=db_mod.engine)
+    if os.getenv("PREDRIVE_AUTO_SEED", "1") == "1":
+        with db_mod.SessionLocal() as db:
+            has_org = db.scalar(select(Organization.id).limit(1))
+            if has_org is None:
+                logger.info("Database trống — đang chạy seed dữ liệu mẫu M3...")
+                seed_database(db)
+                logger.info("Đã hoàn tất seed dữ liệu mẫu M3.")
+
+    # 2. Initialize AI Model for M1/M2 WebSocket gateway
+    logger.info("Đang khởi tạo AI Model...")
+    ai_analyzer = DriverMonitorAI()
+    logger.info("AI Model đã sẵn sàng!")
+
+    # 3. Start background watchdog task for M3 session heartbeat monitoring
+    stop_event = asyncio.Event()
+    watchdog_task: asyncio.Task[None] | None = None
+    if get_config().enable_watchdog:
+        watchdog_task = asyncio.create_task(watchdog_loop(stop_event))
+
+    try:
+        yield
+    finally:
+        stop_event.set()
+        if watchdog_task is not None:
+            watchdog_task.cancel()
+            try:
+                await watchdog_task
+            except asyncio.CancelledError:
+                pass
+        sessions.clear()
+        active_sessions.clear()
+
+
+app = FastAPI(
+    title="PREDRIVE AI Gateway & Fleet Backend (M3)",
+    version="0.3.0",
+    lifespan=lifespan,
+)
+
+register_error_handlers(app)
+
+origins = [
+    o.strip()
+    for o in os.getenv(
+        "PREDRIVE_ALLOWED_ORIGINS",
+        "http://localhost:5173,https://localhost:5173,http://127.0.0.1:5173",
+    ).split(",")
+    if o.strip()
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
+)
+
+# Mount M3 API routers
+app.include_router(auth_router.router)
+app.include_router(driver_app_router.router)
+app.include_router(web_admin_router.router)
+
+
+@app.get("/health")
+async def health() -> dict[str, str]:
+    return {"status": "ok", "service": "predrive-backend", "version": "0.1.0"}
 
 
 def decode_jpeg(encoded: str) -> tuple[bytes, tuple[int, int]]:
-    # Reject pathological input before allocating the decoded buffer.
     if len(encoded) > ((MAX_FRAME_BYTES + 2) // 3) * 4 + 4:
         raise ValueError("image exceeds size limit")
     try:
@@ -182,18 +241,22 @@ async def monitor(websocket: WebSocket, session_id: str) -> None:
                 frame_times.append(now_mono)
             except ValueError as exc:
                 print(f"[BACKEND WARNING] Frame rejected: {exc}", flush=True)
-                await websocket.send_json({"type": "error", "code": "INVALID_FRAME", "detail": str(exc)})
+                await websocket.send_json(
+                    {"type": "error", "code": "INVALID_FRAME", "detail": str(exc)}
+                )
                 continue
 
             last_frame_id = frame.frame_id
             processed_at = datetime.now(timezone.utc)
 
-            # Phân tích AI từ frame ảnh
             if ai_analyzer is not None:
                 nparr = np.frombuffer(raw_bytes, np.uint8)
                 frame_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                 ai_output = ai_analyzer.analyze(frame_bgr, session_id=str(parsed_session))
-                print(f"[AI] Frame {frame.frame_id} | State: {ai_output.state} | Alert: {ai_output.alert_level} | EAR: {ai_output.ear} | Quality: {ai_output.image_quality}", flush=True)
+                print(
+                    f"[AI] Frame {frame.frame_id} | State: {ai_output.state} | Alert: {ai_output.alert_level} | EAR: {ai_output.ear} | Quality: {ai_output.image_quality}",
+                    flush=True,
+                )
                 response = AnalysisResult(
                     session_id=parsed_session,
                     frame_id=frame.frame_id,
