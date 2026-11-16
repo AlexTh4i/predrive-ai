@@ -27,10 +27,13 @@ frontend/android/app/src/main/assets/public/
 *.keystore
 *.jks
 
-# --- Bí mật ---
+# --- Bí mật & Database cục bộ ---
 .env
 .env.*
 !.env.example
+*.db
+*.db-wal
+*.db-shm
 
 # --- Thư mục cũ / tạm ---
 temp_backend/
