@@ -8,6 +8,8 @@ import type {
   EndSessionRequest,
   HeartbeatRequest,
   HeartbeatResponse,
+  LocationIngestPayload,
+  LocationIngestResponse,
   LoginResponse,
   PairResponse,
   SessionSummaryResponse,
@@ -329,6 +331,20 @@ export const m3Api = {
     serverUrl?: string,
   ): Promise<HeartbeatResponse> {
     return requestJson(`/api/v1/sessions/${encodeURIComponent(sessionId)}/heartbeat`, {
+      method: 'POST',
+      token,
+      body: payload,
+      serverUrl,
+    });
+  },
+
+  postLocations(
+    token: string,
+    sessionId: string,
+    payload: LocationIngestPayload,
+    serverUrl?: string,
+  ): Promise<LocationIngestResponse> {
+    return requestJson(`/api/v1/sessions/${encodeURIComponent(sessionId)}/locations`, {
       method: 'POST',
       token,
       body: payload,

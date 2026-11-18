@@ -9,6 +9,7 @@ import { Login } from './pages/Login';
 import { Settings } from './pages/Settings';
 
 const Dashboard = lazy(() => import('./pages/Dashboard').then(({ Dashboard }) => ({ default: Dashboard })));
+const FleetMap = lazy(() => import('./pages/FleetMap').then(({ FleetMap }) => ({ default: FleetMap })));
 const DriverDetail = lazy(() => import('./pages/DriverDetail').then(({ DriverDetail }) => ({ default: DriverDetail })));
 const Stats = lazy(() => import('./pages/Stats').then(({ Stats }) => ({ default: Stats })));
 
@@ -39,6 +40,7 @@ export function App() {
       <Route element={<RequireOperator />}>
         <Route element={<Layout />}>
           <Route index element={<Dashboard />} />
+          <Route path="map" element={<FleetMap />} />
           <Route path="history" element={<History />} />
           <Route path="drivers" element={<Drivers />} />
           <Route path="drivers/:id" element={<DriverDetail />} />

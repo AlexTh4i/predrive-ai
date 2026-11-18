@@ -48,7 +48,14 @@ export interface LiveDriverState {
   totalDrivingSec: number;
   drowsyCountToday: number;
   lastHeartbeatAt: string | null;
-  location: { lat: number; lng: number; at: string } | null;
+  location: {
+    lat: number;
+    lng: number;
+    at: string;
+    speedKmh?: number | null;
+    headingDeg?: number | null;
+    eventId?: string | null;
+  } | null;
 }
 
 export interface AlertEvent {
@@ -59,6 +66,7 @@ export interface AlertEvent {
   vehicleName: string;
   type: EventType;
   level: EventLevel;
+  severityLevel?: number;
   status: EventStatus;
   state: DriverState;
   riskScore: number | null;
@@ -70,6 +78,9 @@ export interface AlertEvent {
   ackBy: string | null;
   ackAt: string | null;
   note: string | null;
+  lat?: number | null;
+  lng?: number | null;
+  driverFeedback?: string | null;
 }
 
 export interface Session {
@@ -165,4 +176,51 @@ export interface CreatePairingCodePayload {
 export interface PairingCodeResult {
   code: string;
   expiresAt: string;
+}
+
+export interface LiveVehicleLocation {
+  driverId: string;
+  driverName: string;
+  vehicleId?: string | null;
+  vehicleName: string;
+  state: DriverState;
+  sessionId: string | null;
+  lat: number;
+  lng: number;
+  speedKmh?: number | null;
+  headingDeg?: number | null;
+  at: string;
+}
+
+export interface LocationTrailPoint {
+  lat: number;
+  lng: number;
+  speedKmh?: number | null;
+  headingDeg?: number | null;
+  at: string;
+  eventId?: string | null;
+}
+
+export interface LocationTrailAlertPin {
+  eventId: string;
+  type: EventType;
+  level: EventLevel;
+  severityLevel?: number;
+  status: EventStatus;
+  driverId: string;
+  driverName: string;
+  vehicleName: string;
+  lat: number;
+  lng: number;
+  occurredAt: string;
+  note?: string | null;
+}
+
+export interface LocationTrailResponse {
+  driverId: string;
+  driverName: string;
+  vehicleName: string;
+  sessionId: string | null;
+  points: LocationTrailPoint[];
+  alerts: LocationTrailAlertPin[];
 }
