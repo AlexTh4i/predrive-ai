@@ -1222,3 +1222,135 @@ def test_p3_8_public_api_keys_scopes_revocation_hmac_webhooks_retry_and_tracker_
     finally:
         wh_server.shutdown()
         wh_server.server_close()
+
+
+def test_p3_9_zalo_sms_notification_fallback_mock_and_blocked_when_unconfigured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    import json as json_mod
+    import threading
+
+    from app.core import database as db_mod
+    from app.models.models import Organization, User
+    from app.core.security import hash_password
+    from app.services.notify import notification_dispatcher, notify_user
+
+    # 1) Unconfigured in ENV=development -> status explicitly reports BLOCKED for real providers and uses MockCaptureProvider
+    monkeypatch.delenv("ZALO_OA_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("SMS_API_KEY", raising=False)
+    monkeypatch.delenv("SMS_API_URL", raising=False)
+    monkeypatch.delenv("FCM_SERVER_KEY", raising=False)
+
+    app = _setup_test_app(tmp_path, monkeypatch)
+    notification_dispatcher.reset_defaults()
+
+    with TestClient(app) as client:
+        mgr = client.post(
+            "/api/v1/auth/login", json={"username": "manager", "password": "manager123"}
+        ).json()
+        mgr_token = mgr["accessToken"]
+
+        status_res = client.get(
+            "/api/v1/notifications/status", headers=_auth(mgr_token)
+        ).json()["channels"]
+        assert status_res["zalo"]["configured"] is False
+        assert status_res["zalo"]["status"].startswith("BLOCKED:")
+        assert status_res["sms"]["configured"] is False
+        assert status_res["sms"]["status"].startswith("BLOCKED:")
+
+        mock_test = client.post(
+            "/api/v1/notifications/test?channel=zalo", headers=_auth(mgr_token)
+        ).json()
+        assert mock_test["delivered"] is True
+        assert mock_test["provider"] == "mock"
+        assert len(notification_dispatcher.mock_provider.sent_messages) == 1
+
+    # 2) In ENV=production without keys -> NEVER fakes success; returns delivered=False + BLOCKED error!
+    monkeypatch.setenv("ENV", "production")
+    notification_dispatcher.reset_defaults()
+    with db_mod.SessionLocal() as db:
+        prod_org = Organization(id=str(uuid4()), name="Prod Test Org")
+        prod_usr = User(
+            id=str(uuid4()),
+            organization_id=prod_org.id,
+            username="prod_mgr",
+            password_hash=hash_password("StrongPass123!"),
+            full_name="Prod Manager",
+            role="manager",
+            phone="0909998888",
+        )
+        db.add_all([prod_org, prod_usr])
+        db.commit()
+        db.refresh(prod_usr)
+
+        blocked_res = notify_user(
+            db=db,
+            recipient=prod_usr,
+            channel="zalo",
+            title="Prod Alert",
+            body="Must be BLOCKED when unconfigured",
+        )
+        assert blocked_res.delivered is False
+        assert blocked_res.provider == "unconfigured"
+        assert blocked_res.error is not None and "BLOCKED:" in blocked_res.error
+
+    # 3) Automatic fallback chain: Zalo ZNS returns HTTP 503 -> automatically falls back to SMS Gateway (200 OK)!
+    sms_received: list[dict] = []
+    zalo_attempts = {"count": 0}
+
+    class _ProviderMockServer(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length).decode("utf-8")
+            if self.path == "/zalo/template":
+                zalo_attempts["count"] += 1
+                self.send_response(503)
+                self.end_headers()
+                self.wfile.write(b'{"error":-1,"message":"Zalo upstream outage"}')
+                return
+            if self.path == "/sms/send":
+                sms_received.append(json_mod.loads(raw))
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"status":"queued"}')
+                return
+            self.send_response(404)
+            self.end_headers()
+
+        def log_message(self, format, *args):  # noqa: A002
+            return
+
+    srv = HTTPServer(("127.0.0.1", 0), _ProviderMockServer)
+    port = srv.server_address[1]
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+
+    try:
+        monkeypatch.setenv("ZALO_OA_ACCESS_TOKEN", "test-zalo-token")
+        monkeypatch.setenv("ZALO_ZNS_ENDPOINT_URL", f"http://127.0.0.1:{port}/zalo/template")
+        monkeypatch.setenv("SMS_API_KEY", "test-sms-key")
+        monkeypatch.setenv("SMS_API_URL", f"http://127.0.0.1:{port}/sms/send")
+        notification_dispatcher.reset_defaults()
+
+        with db_mod.SessionLocal() as db:
+            usr = db.get(User, prod_usr.id)
+            assert usr is not None
+            fb_res = notify_user(
+                db=db,
+                recipient=usr,
+                channel="zalo",
+                title="Leo thang khan",
+                body="Tai xe buon ngu muc 3",
+            )
+            assert zalo_attempts["count"] == 1
+            assert fb_res.delivered is True
+            assert fb_res.channel_used == "sms"
+            assert fb_res.provider == "sms_gateway"
+            assert fb_res.fallback_used is True
+            assert len(sms_received) == 1
+            assert sms_received[0]["to"] == "0909998888"
+    finally:
+        srv.shutdown()
+        srv.server_close()
