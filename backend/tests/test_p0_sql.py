@@ -266,3 +266,40 @@ def test_p0_3_supabase_pooler_url_and_full_m3_suite_on_postgres15(
         m3_tests.test_step4_and_step5_web_endpoints_div_by_zero_and_sse(pg_client)
 
 
+def test_p0_4_production_startup_creates_zero_users(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from fastapi.testclient import TestClient
+    from sqlalchemy import func, select
+
+    from app.core import database as db_mod
+    from app.main import app
+    from app.models.models import Organization, User
+    from app.services.seed import seed_database
+
+    prod_db = tmp_path / "prod_empty.db"
+    prod_url = f"sqlite:///{prod_db.as_posix()}"
+    monkeypatch.setenv("ENV", "production")
+    monkeypatch.setenv("DATABASE_URL", prod_url)
+    monkeypatch.setenv("PREDRIVE_AUTO_SEED", "1")
+    monkeypatch.setenv("PREDRIVE_ENABLE_WATCHDOG", "0")
+
+    db_mod.reset_engine(prod_url)
+
+    with TestClient(app) as client:
+        assert client.get("/health").status_code == 200
+        # Login with default seed credentials MUST fail on production
+        res = client.post(
+            "/api/v1/auth/login",
+            json={"username": "manager", "password": "manager123"},
+        )
+        assert res.status_code == 401
+
+    with db_mod.SessionLocal() as db:
+        assert db.scalar(select(func.count(User.id))) == 0
+        assert db.scalar(select(func.count(Organization.id))) == 0
+        with pytest.raises(RuntimeError, match="production"):
+            seed_database(db)
+
+
+
