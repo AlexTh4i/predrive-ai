@@ -1,0 +1,38 @@
+groups:
+  - name: predrive_alerts
+    rules:
+      - alert: PreDriveDatabaseDown
+        expr: predrive_db_up == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "PreDrive AI Database Unreachable"
+          description: "Backend cannot execute health query against PostgreSQL/Supabase for > 30s."
+
+      - alert: PreDriveHighApiErrorRate
+        expr: rate(predrive_http_errors_total[5m]) > 0.5
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High 5xx API Error Rate on PreDrive Backend"
+          description: "5xx error rate exceeded 0.5 req/s over 5 minutes."
+
+      - alert: PreDriveNoHeartbeatsForActiveSessions
+        expr: predrive_active_sessions > 0 and increase(predrive_heartbeats_received_total[3m]) == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No driver heartbeats received while active sessions exist"
+          description: "Active sessions > 0 but zero heartbeats arrived in the last 3 minutes."
+
+      - alert: PreDriveDriversDisconnectedSpike
+        expr: predrive_disconnected_drivers >= 3
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Multiple drivers in DISCONNECTED state"
+          description: "{{ $value }} active sessions are currently DISCONNECTED."
