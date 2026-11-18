@@ -52,3 +52,14 @@ def test_p2_2_caddyfile_https_sse_flush_and_grafana_subdomain():
     assert "/api/*" in caddyfile
     assert "admin-web:80" in caddyfile
     assert "grafana:3000" in caddyfile
+
+
+def test_p2_3_github_actions_ci_cd_with_schema_check_and_rollback():
+    ci_file = ROOT_DIR / ".github" / "workflows" / "ci.yml"
+    assert ci_file.exists()
+    content = ci_file.read_text(encoding="utf-8")
+    assert "postgres:15-alpine" in content
+    assert "supabase/schema.sql" in content
+    assert "playwright test" in content or "npm test" in content
+    assert "Rolling back to" in content
+
