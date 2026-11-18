@@ -725,3 +725,118 @@ def test_p3_4_alarm_fatigue_driver_feedback_and_usage_7d(
         assert row["alertsFalse"] == 1
         assert row["offPerHour"] == pytest.approx(1.5)
         assert row["falseAlertPct"] == pytest.approx(25.0)
+
+
+def test_p3_7_fcm_push_tokens_registration_and_closed_tab_delivery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    import json as json_mod
+    import threading
+
+    from app.services.notify import notification_dispatcher
+
+    received_fcm_payloads: list[dict] = []
+
+    class _MockFcmHandler(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length).decode("utf-8")
+            received_fcm_payloads.append(
+                {
+                    "auth": self.headers.get("Authorization"),
+                    "body": json_mod.loads(raw),
+                }
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"success":1,"failure":0}')
+
+        def log_message(self, format, *args):  # noqa: A002
+            return
+
+    fcm_server = HTTPServer(("127.0.0.1", 0), _MockFcmHandler)
+    fcm_port = fcm_server.server_address[1]
+    t = threading.Thread(target=fcm_server.serve_forever, daemon=True)
+    t.start()
+
+    try:
+        monkeypatch.setenv("FCM_SERVER_KEY", "test-fcm-server-key")
+        monkeypatch.setenv("FCM_ENDPOINT_URL", f"http://127.0.0.1:{fcm_port}/fcm/send")
+        app = _setup_test_app(tmp_path, monkeypatch)
+        notification_dispatcher.reset_defaults()
+
+        with TestClient(app) as client:
+            disp = client.post(
+                "/api/v1/auth/login",
+                json={"username": "dispatcher", "password": "dispatcher123"},
+            ).json()
+            disp_token = disp["accessToken"]
+
+            drv = client.post(
+                "/api/v1/auth/login",
+                json={"username": "driver1", "password": "driver123"},
+            ).json()
+            drv_token = drv["accessToken"]
+
+            # 1) Dispatcher registers Web push token; Driver registers Android push token
+            r_web = client.post(
+                "/api/v1/push-tokens",
+                json={"fcmToken": "web-fcm-token-dispatcher-001", "platform": "web"},
+                headers=_auth(disp_token),
+            )
+            assert r_web.status_code == 201
+            r_and = client.post(
+                "/api/v1/push-tokens",
+                json={"fcmToken": "android-fcm-token-driver-001", "platform": "android"},
+                headers=_auth(drv_token),
+            )
+            assert r_and.status_code == 201
+
+            my_tokens = client.get("/api/v1/push-tokens", headers=_auth(disp_token)).json()
+            assert any(t_item["fcmToken"] == "web-fcm-token-dispatcher-001" for t_item in my_tokens)
+
+            # 2)Even with no SSE stream open (closed browser tab), CRITICAL event delivers FCM push to dispatcher!
+            now = datetime.now(timezone.utc)
+            sess_id = str(uuid4())
+            client.post(
+                "/api/v1/sessions",
+                json={"sessionId": sess_id, "startedAt": now.isoformat()},
+                headers=_auth(drv_token),
+            )
+            ev_res = client.post(
+                f"/api/v1/sessions/{sess_id}/events",
+                json={
+                    "eventId": str(uuid4()),
+                    "type": "DROWSINESS",
+                    "level": "CRITICAL",
+                    "severityLevel": 3,
+                    "status": "ESCALATED",
+                    "state": "CRITICAL",
+                    "riskScore": 0.96,
+                    "startedAt": now.isoformat(),
+                    "durationSec": 5,
+                    "capturedAt": now.isoformat(),
+                },
+                headers=_auth(drv_token),
+            )
+            assert ev_res.status_code == 200
+            assert any(
+                p["body"]["to"] == "web-fcm-token-dispatcher-001"
+                and p["auth"] == "key=test-fcm-server-key"
+                for p in received_fcm_payloads
+            )
+
+            # 3) Unregister push token on logout
+            del_res = client.request(
+                "DELETE",
+                "/api/v1/push-tokens",
+                json={"fcmToken": "web-fcm-token-dispatcher-001"},
+                headers=_auth(disp_token),
+            )
+            assert del_res.status_code == 200
+            assert del_res.json()["deleted"] == 1
+    finally:
+        fcm_server.shutdown()
+        fcm_server.server_close()

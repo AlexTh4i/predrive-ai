@@ -576,3 +576,20 @@ class EscalationItem(CamelModel):
     sentAt: UtcDatetime
 
 
+class RegisterPushTokenRequest(CamelModel):
+    fcmToken: str = Field(min_length=8, max_length=4096)
+    platform: Literal["android", "ios", "web"] = "web"
+
+
+class UnregisterPushTokenRequest(CamelModel):
+    fcmToken: str = Field(min_length=1, max_length=4096)
+
+
+class PushTokenItem(CamelModel):
+    id: str
+    userId: str
+    fcmToken: str
+    platform: Literal["android", "ios", "web"]
+    updatedAt: UtcDatetime
+
+

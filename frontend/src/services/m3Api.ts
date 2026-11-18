@@ -408,4 +408,18 @@ export const m3Api = {
       serverUrl,
     });
   },
+
+  registerPushToken(
+    token: string,
+    fcmToken: string,
+    platform: 'android' | 'ios' | 'web',
+    serverUrl?: string,
+  ): Promise<{ id: string }> {
+    return requestJson('/api/v1/push-tokens', {
+      method: 'POST',
+      token,
+      body: { fcmToken, platform },
+      serverUrl,
+    });
+  },
 };

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AnalysisResult } from '../ai/driverAnalyzer';
 import { getServerUrl, setServerUrl as persistServerUrl } from '../config/env';
 import { configureM3TokenRefresh, isTransientSyncError, m3Api, M3ApiError } from '../services/m3Api';
+import { registerDriverPushTokenIfAvailable } from '../services/pushNotifications';
 import {
   clearOfflineQueue,
   enqueueEvent,
@@ -324,6 +325,7 @@ export function useDriverSync() {
       setHealthError(null);
       setSyncStatus('ready');
       setSyncError(null);
+      void registerDriverPushTokenIfAvailable(res.accessToken, targetUrl);
       void flushNow();
       return nextAuth;
     },
