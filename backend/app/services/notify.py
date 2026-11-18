@@ -308,6 +308,27 @@ class NotificationDispatcher:
             "sms": SmsGatewayProvider(),
         }
 
+    def get_provider_statuses(self) -> dict[str, dict[str, Any]]:
+        requirements = {
+            "push": "BLOCKED: cần FCM_SERVER_KEY hoặc FIREBASE_SERVICE_ACCOUNT_JSON",
+            "zalo": "BLOCKED: cần ZALO_OA_ACCESS_TOKEN",
+            "sms": "BLOCKED: cần SMS_API_KEY và SMS_API_URL",
+        }
+        statuses: dict[str, dict[str, Any]] = {}
+        for ch, prov in self.providers.items():
+            configured = bool(prov.is_configured())
+            statuses[ch] = {
+                "provider": prov.name,
+                "configured": configured,
+                "status": "ready" if configured else requirements.get(ch, "BLOCKED"),
+            }
+        statuses["mockFallbackEnabled"] = {
+            "provider": "mock",
+            "configured": self.mock_provider.is_configured(),
+            "status": "ready_dev_only" if self.mock_provider.is_configured() else "disabled_in_production",
+        }
+        return statuses
+
     def dispatch(self, db: Session, msg: NotificationMessage) -> NotificationResult:
         chain = FALLBACK_ORDER.get(msg.channel, [msg.channel, "push"])
         any_real_configured = any(

@@ -96,6 +96,7 @@ from ..services.mappers import (
     to_vn_time,
 )
 from ..services.sse import sse_broker
+from ..services.notify import notification_dispatcher, notify_user
 from ..services.webhook_service import seal_webhook_secret
 from ..services.rest_service import find_nearest_rest_stops
 from ..services.risk_report_service import (
@@ -1894,3 +1895,35 @@ def delete_webhook(
     )
     db.commit()
     return {"status": "deactivated", "id": wh.id}
+
+
+# --- ZALO OA/ZNS & SMS NOTIFICATION CHANNELS (P3-9) ---
+@router.get("/notifications/status")
+def get_notification_channels_status(
+    current_user: User = Depends(require_roles("manager")),
+) -> dict[str, object]:
+    _ = get_jwt_org_id(current_user)
+    return {"channels": notification_dispatcher.get_provider_statuses()}
+
+
+@router.post("/notifications/test")
+def send_test_notification(
+    channel: Literal["zalo", "sms", "push"] = Query(default="zalo"),
+    current_user: User = Depends(require_roles("manager")),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    _ = get_jwt_org_id(current_user)
+    res = notify_user(
+        db=db,
+        recipient=current_user,
+        channel=channel,
+        title="PreDrive AI — Kiểm tra kênh cảnh báo",
+        body="Tin nhắn kiểm tra kết nối thông báo tự động.",
+    )
+    return {
+        "delivered": res.delivered,
+        "channelUsed": res.channel_used,
+        "provider": res.provider,
+        "fallbackUsed": res.fallback_used,
+        "error": res.error,
+    }
