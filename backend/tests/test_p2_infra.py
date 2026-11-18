@@ -372,5 +372,50 @@ def test_p2_6_retention_settings_and_purge_deletes_expired_keeps_fresh_and_logs(
             )
 
 
+def test_p2_7_redis_sse_pubsub_across_two_backend_instances():
+    import asyncio
+    from app.services.sse import SSEBroker
+
+    redis_url = "redis://127.0.0.1:63799/0"
+    org_a = "11111111-1111-4111-8111-111111111111"
+    org_b = "22222222-2222-4222-8222-222222222222"
+
+    async def _run_cross_instance_check() -> None:
+        instance_a = SSEBroker(redis_url=redis_url)
+        instance_b = SSEBroker(redis_url=redis_url)
+        assert instance_a.instance_id != instance_b.instance_id
+
+        try:
+            assert instance_a.start_redis_listener() is True
+            assert instance_b.start_redis_listener() is True
+
+            # Client for Org A & Client for Org B both connect to Instance B
+            queue_org_a_on_b = instance_b.subscribe(org_a)
+            queue_org_b_on_b = instance_b.subscribe(org_b)
+
+            # Driver event arrives at Instance A for Org A!
+            instance_a.publish(
+                org_a,
+                "alert",
+                {"id": "ev-cross-instance-01", "level": "CRITICAL", "type": "DROWSINESS"},
+            )
+
+            # Client on Instance B MUST receive the event via Redis Pub/Sub!
+            msg = await asyncio.wait_for(queue_org_a_on_b.get(), timeout=3.0)
+            assert msg["event"] == "alert"
+            parsed = json.loads(msg["data"])
+            assert parsed["id"] == "ev-cross-instance-01"
+            assert parsed["level"] == "CRITICAL"
+
+            # Org B subscriber on Instance B must NOT receive Org A's message!
+            assert queue_org_b_on_b.empty()
+        finally:
+            instance_a.stop_redis_listener()
+            instance_b.stop_redis_listener()
+
+    asyncio.run(_run_cross_instance_check())
+
+
+
 
 
