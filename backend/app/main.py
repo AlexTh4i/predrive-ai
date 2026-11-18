@@ -50,6 +50,7 @@ from .services.observability import (
 )
 from .services.rate_limiter import rate_limiter
 from .services.seed import seed_database
+from .services.sse import sse_broker
 from .services.watchdog import watchdog_loop
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -130,7 +131,8 @@ async def lifespan(_: FastAPI):
                 _LEGACY_AI_IMPORT_ERROR,
             )
 
-    # 3. Start background watchdog task for M3 session heartbeat monitoring
+    # 3. Start Redis SSE Pub/Sub listener (if REDIS_URL is configured) & background watchdog
+    sse_broker.start_redis_listener()
     stop_event = asyncio.Event()
     watchdog_task: asyncio.Task[None] | None = None
     if get_config().enable_watchdog:
@@ -140,6 +142,7 @@ async def lifespan(_: FastAPI):
         yield
     finally:
         stop_event.set()
+        sse_broker.stop_redis_listener()
         if watchdog_task is not None:
             watchdog_task.cancel()
             try:
