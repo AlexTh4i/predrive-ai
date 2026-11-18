@@ -31,6 +31,8 @@ interface DriverConnectSheetProps {
   onSaveAndTestServer: (url: string) => Promise<boolean>;
   onLogin: (username: string, password: string, serverUrl?: string) => Promise<DriverAuthSession>;
   onPair: (code: string) => Promise<DriverAuthSession>;
+  onAcceptConsent: (locationConsent: boolean) => Promise<DriverAuthSession>;
+  onChangePassword: (currentPassword: string, newPassword: string) => Promise<DriverAuthSession>;
   onLogout: () => void;
   onFlushNow: () => Promise<void>;
 }
@@ -55,6 +57,8 @@ function DriverConnectSheetInner({
   onSaveAndTestServer,
   onLogin,
   onPair,
+  onAcceptConsent,
+  onChangePassword,
   onLogout,
   onFlushNow,
 }: DriverConnectSheetProps) {
@@ -63,7 +67,10 @@ function DriverConnectSheetInner({
   const [password, setPassword] = useState('');
   const [pairCode, setPairCode] = useState('');
   const [consentChecked, setConsentChecked] = useState(true);
-  const [busyAction, setBusyAction] = useState<'server' | 'login' | 'pair' | 'sync' | null>(null);
+  const [locationConsent, setLocationConsent] = useState(true);
+  const [currentPwd, setCurrentPwd] = useState('');
+  const [newPwd, setNewPwd] = useState('');
+  const [busyAction, setBusyAction] = useState<'server' | 'login' | 'pair' | 'sync' | 'consent' | 'password' | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [formSuccess, setFormSuccess] = useState<string | null>(null);
 
@@ -125,6 +132,39 @@ function DriverConnectSheetInner({
     setFormSuccess(null);
     await onFlushNow();
     setBusyAction(null);
+  }
+
+  async function handleAcceptConsent() {
+    if (busyAction) return;
+    setBusyAction('consent');
+    setFormError(null);
+    setFormSuccess(null);
+    try {
+      await onAcceptConsent(locationConsent);
+      setFormSuccess('Đã lưu xác nhận đồng ý xử lý dữ liệu (Nghị định 13/2023/NĐ-CP).');
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : 'Không thể lưu xác nhận đồng ý.');
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleChangePasswordSubmit(event: FormEvent) {
+    event.preventDefault();
+    if (busyAction) return;
+    setBusyAction('password');
+    setFormError(null);
+    setFormSuccess(null);
+    try {
+      await onChangePassword(currentPwd, newPwd);
+      setCurrentPwd('');
+      setNewPwd('');
+      setFormSuccess('Đã đổi mật khẩu lần đầu thành công.');
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : 'Đổi mật khẩu thất bại.');
+    } finally {
+      setBusyAction(null);
+    }
   }
 
   return (
@@ -364,6 +404,71 @@ function DriverConnectSheetInner({
               </div>
               {syncError && <p className="text-[11px] text-[#F5A623]">{syncError}</p>}
             </div>
+
+            {/* Bắt buộc đổi mật khẩu lần đầu (P1-1) */}
+            {auth.user.mustChangePassword && (
+              <form
+                onSubmit={(e) => void handleChangePasswordSubmit(e)}
+                className="p-3.5 rounded-2xl bg-[#FFF8EB] border border-[#F5A623] space-y-2.5"
+              >
+                <p className="text-xs font-bold text-[#1C1C1C]">
+                  Đổi mật khẩu tạm thời (Bắt buộc lần đầu)
+                </p>
+                <input
+                  type="password"
+                  value={currentPwd}
+                  onChange={(e) => setCurrentPwd(e.target.value)}
+                  placeholder="Mật khẩu tạm hiện tại"
+                  required
+                  className="w-full h-10 px-3 rounded-xl border border-[#CED8D3] bg-white text-sm"
+                />
+                <input
+                  type="password"
+                  value={newPwd}
+                  onChange={(e) => setNewPwd(e.target.value)}
+                  placeholder="Mật khẩu mới (tối thiểu 8 ký tự)"
+                  minLength={8}
+                  required
+                  className="w-full h-10 px-3 rounded-xl border border-[#CED8D3] bg-white text-sm"
+                />
+                <button
+                  type="submit"
+                  disabled={busyAction === 'password'}
+                  className="w-full h-10 rounded-xl bg-[#00B14F] text-white text-xs font-bold disabled:opacity-60"
+                >
+                  {busyAction === 'password' ? 'Đang cập nhật...' : 'Cập nhật mật khẩu mới'}
+                </button>
+              </form>
+            )}
+
+            {/* Đồng ý xử lý dữ liệu Nghị định 13/2023/NĐ-CP (P1-7) */}
+            {!auth.user.hasConsented && !auth.consentedAt && (
+              <div className="p-3.5 rounded-2xl bg-[#E5F7ED] border border-[#00B14F] space-y-2.5">
+                <p className="text-xs font-bold text-[#087340]">
+                  Đồng ý xử lý dữ liệu (Nghị định 13/2023/NĐ-CP · v2026-01)
+                </p>
+                <p className="text-[11px] text-[#1C1C1C] leading-snug">
+                  AI phân tích trực tiếp trên điện thoại, <strong>tuyệt đối không truyền hay lưu ảnh/video khuôn mặt</strong> về máy chủ. Ứng dụng chỉ gửi trạng thái tỉnh táo và nhịp tim khi bạn đồng ý.
+                </p>
+                <label className="flex items-start gap-2 text-[11px] text-[#1C1C1C] cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={locationConsent}
+                    onChange={(e) => setLocationConsent(e.target.checked)}
+                    className="mt-0.5 accent-[#00B14F]"
+                  />
+                  <span>Cho phép chia sẻ tọa độ GPS hành trình khi nhà xe bật tính năng bản đồ.</span>
+                </label>
+                <button
+                  type="button"
+                  disabled={busyAction === 'consent'}
+                  onClick={() => void handleAcceptConsent()}
+                  className="w-full h-10 rounded-xl bg-[#00B14F] hover:bg-[#009A44] text-white text-xs font-bold disabled:opacity-60"
+                >
+                  {busyAction === 'consent' ? 'Đang lưu...' : 'Tôi đã hiểu và Đồng ý'}
+                </button>
+              </div>
+            )}
 
             {/* Ghép xe bằng mã 6 ký tự */}
             <form onSubmit={(e) => void handlePairSubmit(e)} className="p-3.5 rounded-2xl bg-[#F8F9FA] border border-[#E8E8E8] space-y-2.5">

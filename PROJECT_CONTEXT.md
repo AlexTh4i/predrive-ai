@@ -1,8 +1,8 @@
 # PREDRIVE AI — PROJECT CONTEXT (TỔNG QUAN & TRẠNG THÁI HỆ THỐNG CẬP NHẬT)
 
-> **Phiên bản:** 4.0 (Production Hardening — Phase 0 Hoàn tất: PostgreSQL 15 / Supabase 22-table RLS Schema + Dual DB Engine) | **Ngày cập nhật:** 18/11/2026  
-> **Mới (v4.0 — Phase 0):** Hoàn tất kiểm chứng `supabase/schema.sql` (22 bảng, UUID, Enum, RLS `rowsecurity=true`, Views, Functions) & `supabase/seed.sql` trên PostgreSQL 15 sạch; đồng bộ 100% SQLAlchemy ORM (`models.py`) + Alembic (`0002_production_v1`); hỗ trợ song song SQLite WAL (dev) và PostgreSQL/Supabase Pooler (`sslmode=require`, `prepare_threshold=None`); chặn tuyệt đối seed khi `ENV=production`; hoàn thiện `scripts/push_to_supabase.sh` và `scripts/hash_seed_passwords.py`.  
-> **Trạng thái hiện tại:** Đã hoàn thành M1 → M4 và **Phase 0 Production Hardening** (23/23 pytest trên cả SQLite & Postgres 15, 6/6 Playwright `admin-web`, build `frontend/` xanh).  
+> **Phiên bản:** 4.0 (Production Hardening — Hoàn tất Phase 0 & Phase 1: Supabase Postgres 15 RLS + Bảo mật JWT/Refresh xoay vòng, Rate Limit, Audit Log, Multi-tenant & Nghị định 13/2023) | **Ngày cập nhật:** 18/11/2026  
+> **Mới (v4.0 — Phase 0 & Phase 1):** Hoàn tất schema 22 bảng PostgreSQL 15 / Supabase + RLS (`rowsecurity=true`), Alembic `0002_production_v1`, Dual DB SQLite/Postgres; bổ sung Access Token 15 phút + Refresh Token xoay vòng phát hiện tái sử dụng (`refresh_tokens`), bắt buộc đổi mật khẩu lần đầu cho tài khoản tạo bởi quản lý, Rate Limit Redis/in-memory kèm `Retry-After`, Audit Log (`audit_logs`) có phân trang, cách ly Multi-tenant rút `organization_id` từ JWT, tắt Swagger ở production + Security Headers + giới hạn body 413, và quản lý `consents` theo Nghị định 13/2023/NĐ-CP.  
+> **Trạng thái hiện tại:** Đã hoàn thành M1 → M4, **Phase 0** và **Phase 1 Production Hardening** (31/31 pytest xanh, 6/6 Playwright `admin-web` xanh, build `frontend/` xanh).  
 >
 > **Nguồn thông tin chung cho cả ba thành viên và AI Coding Assistants (Codex / Antigravity).** Đọc file này trước, sau đó đọc `AI_CONTEXT.md`, `FRONTEND_CONTEXT.md`, `BACKEND_CONTEXT.md`, `PLAN_CONTEXT.md` và `docs/api-contract.md`.
 

@@ -16,10 +16,12 @@ from ..core.security import (
     require_roles,
     verify_password,
 )
-from ..models.models import Organization, Pairing, RefreshToken, User, Vehicle, new_uuid
+from ..models.models import Consent, Organization, Pairing, RefreshToken, User, Vehicle, new_uuid
 from ..schemas.m3 import (
     AuthUserSchema,
     ChangePasswordRequest,
+    ConsentAcceptRequest,
+    ConsentStatusResponse,
     LoginRequest,
     LoginResponse,
     LogoutRequest,
@@ -47,13 +49,32 @@ def _client_ip(request: Request) -> str | None:
     return None
 
 
-def _user_to_auth_schema(user: User) -> AuthUserSchema:
+CURRENT_CONSENT_VERSION = "2026-01"
+
+
+def _get_latest_consent(db: Session, user: User) -> Consent | None:
+    return db.scalar(
+        select(Consent)
+        .where(
+            Consent.user_id == user.id,
+            Consent.organization_id == user.organization_id,
+            Consent.consent_type == "data_processing",
+        )
+        .order_by(Consent.accepted_at.desc())
+    )
+
+
+def _user_to_auth_schema(user: User, db: Session | None = None) -> AuthUserSchema:
+    has_consented = True
+    if db is not None and user.role == "driver":
+        has_consented = _get_latest_consent(db, user) is not None
     return AuthUserSchema(
         id=user.id,
         role=user.role,  # type: ignore[arg-type]
         fullName=user.full_name,
         organizationId=user.organization_id,
         mustChangePassword=bool(user.must_change_password),
+        hasConsented=has_consented,
     )
 
 
@@ -139,7 +160,7 @@ def login(
         accessToken=access_token,
         refreshToken=raw_refresh,
         expiresIn=cfg.jwt_expire_minutes * 60,
-        user=_user_to_auth_schema(user),
+        user=_user_to_auth_schema(user, db),
     )
 
 
@@ -212,7 +233,7 @@ def refresh_access_token(
         accessToken=access_token,
         refreshToken=new_raw_refresh,
         expiresIn=cfg.jwt_expire_minutes * 60,
-        user=_user_to_auth_schema(user),
+        user=_user_to_auth_schema(user, db),
     )
 
 
@@ -297,14 +318,96 @@ def change_password(
     )
     db.commit()
     db.refresh(current_user)
-    return _user_to_auth_schema(current_user)
+    return _user_to_auth_schema(current_user, db)
 
 
 @router.get("/me", response_model=AuthUserSchema)
 def get_me(
     current_user: User = Depends(get_current_user_allow_must_change),
+    db: Session = Depends(get_db),
 ) -> AuthUserSchema:
-    return _user_to_auth_schema(current_user)
+    return _user_to_auth_schema(current_user, db)
+
+
+@router.get("/consent", response_model=ConsentStatusResponse)
+def get_my_consent(
+    current_user: User = Depends(get_current_user_allow_must_change),
+    db: Session = Depends(get_db),
+) -> ConsentStatusResponse:
+    row = _get_latest_consent(db, current_user)
+    if row is None:
+        return ConsentStatusResponse(
+            hasConsented=False,
+            version=CURRENT_CONSENT_VERSION,
+            locationConsent=False,
+            clipStorageConsent=False,
+            acceptedAt=None,
+        )
+    return ConsentStatusResponse(
+        hasConsented=True,
+        version=row.version,
+        locationConsent=row.location_consent,
+        clipStorageConsent=False,
+        acceptedAt=ensure_utc(row.accepted_at),
+    )
+
+
+@router.post("/consent", response_model=ConsentStatusResponse)
+def accept_consent(
+    request: Request,
+    payload: ConsentAcceptRequest = ConsentAcceptRequest(),
+    current_user: User = Depends(get_current_user_allow_must_change),
+    db: Session = Depends(get_db),
+) -> ConsentStatusResponse:
+    now = datetime.now(timezone.utc)
+    ver = payload.version.strip() or CURRENT_CONSENT_VERSION
+    existing = db.scalar(
+        select(Consent).where(
+            Consent.user_id == current_user.id,
+            Consent.consent_type == "data_processing",
+            Consent.version == ver,
+        )
+    )
+    if existing is None:
+        row = Consent(
+            id=new_uuid(),
+            organization_id=current_user.organization_id,
+            user_id=current_user.id,
+            consent_type="data_processing",
+            version=ver,
+            location_consent=bool(payload.locationConsent),
+            # Rule R1: NEVER allow face clip storage on server
+            clip_storage_consent=False,
+            accepted_at=now,
+        )
+        db.add(row)
+    else:
+        existing.location_consent = bool(payload.locationConsent)
+        existing.clip_storage_consent = False
+        existing.accepted_at = now
+        row = existing
+
+    db.flush()
+    record_audit_log(
+        db,
+        organization_id=current_user.organization_id,
+        actor_id=current_user.id,
+        action="accept_consent",
+        entity="consent",
+        entity_id=row.id,
+        request=request,
+        meta={"version": ver, "locationConsent": bool(payload.locationConsent)},
+    )
+    db.commit()
+    db.refresh(row)
+
+    return ConsentStatusResponse(
+        hasConsented=True,
+        version=row.version,
+        locationConsent=row.location_consent,
+        clipStorageConsent=False,
+        acceptedAt=ensure_utc(row.accepted_at),
+    )
 
 
 @router.post("/pair", response_model=PairResponse)
@@ -372,6 +475,28 @@ def pair_driver_vehicle(
     pairing.used_at = now
     pairing.consented_at = now
     pairing.status = "PAIRED"
+
+    # Also record Decree 13/2023 consent when driver explicitly confirms pairing consent
+    existing_consent = db.scalar(
+        select(Consent).where(
+            Consent.user_id == current_user.id,
+            Consent.consent_type == "data_processing",
+            Consent.version == CURRENT_CONSENT_VERSION,
+        )
+    )
+    if existing_consent is None:
+        db.add(
+            Consent(
+                id=new_uuid(),
+                organization_id=current_user.organization_id,
+                user_id=current_user.id,
+                consent_type="data_processing",
+                version=CURRENT_CONSENT_VERSION,
+                location_consent=True,
+                clip_storage_consent=False,
+                accepted_at=now,
+            )
+        )
     db.commit()
 
     return PairResponse(vehicleName=veh_name, organizationName=org_name)

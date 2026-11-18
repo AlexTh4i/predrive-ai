@@ -696,6 +696,117 @@ def test_p1_6_production_docs_disabled_cors_security_headers_and_body_limit(
     assert r_413.json()["error"]["code"] == "PAYLOAD_TOO_LARGE"
 
 
+def test_p1_7_decree13_consent_required_before_heartbeat_or_events(
+    p1_client: TestClient,
+):
+    # Manager creates a brand new driver (who has NO Consent row yet!)
+    mgr_login = p1_client.post(
+        "/api/v1/auth/login", json={"username": "manager", "password": "manager123"}
+    ).json()
+    mgr_hdr = {"Authorization": f"Bearer {mgr_login['accessToken']}"}
+
+    created = p1_client.post(
+        "/api/v1/drivers",
+        json={
+            "fullName": "Nguyễn Nghị Định 13",
+            "phone": "0933444555",
+            "username": "drv_consent",
+        },
+        headers=mgr_hdr,
+    ).json()
+
+    # Login and change temporary password
+    drv_login = p1_client.post(
+        "/api/v1/auth/login",
+        json={"username": "drv_consent", "password": created["temporaryPassword"]},
+    ).json()
+    assert drv_login["user"]["hasConsented"] is False
+    drv_hdr = {"Authorization": f"Bearer {drv_login['accessToken']}"}
+
+    assert (
+        p1_client.post(
+            "/api/v1/auth/change-password",
+            json={
+                "currentPassword": created["temporaryPassword"],
+                "newPassword": "ConsentDriver#2026",
+            },
+            headers=drv_hdr,
+        ).status_code
+        == 200
+    )
+
+    # Open session, then try sending heartbeat & event WITHOUT accepting consent -> MUST be rejected (403 CONSENT_REQUIRED)
+    sess_id = str(uuid4())
+    now_iso = datetime.now(timezone.utc).isoformat()
+    assert (
+        p1_client.post(
+            "/api/v1/sessions",
+            json={"sessionId": sess_id, "startedAt": now_iso},
+            headers=drv_hdr,
+        ).status_code
+        == 200
+    )
+
+    hb_blocked = p1_client.post(
+        f"/api/v1/sessions/{sess_id}/heartbeat",
+        json={
+            "state": "NORMAL",
+            "imageQuality": "GOOD",
+            "continuousDrivingSec": 30,
+            "vehicleMoving": True,
+            "capturedAt": now_iso,
+        },
+        headers=drv_hdr,
+    )
+    assert hb_blocked.status_code == 403
+    assert hb_blocked.json()["error"]["code"] == "CONSENT_REQUIRED"
+
+    ev_blocked = p1_client.post(
+        f"/api/v1/sessions/{sess_id}/events",
+        json={
+            "eventId": str(uuid4()),
+            "type": "DROWSINESS",
+            "level": "WARNING",
+            "status": "OPEN",
+            "state": "DROWSINESS_SIGNS",
+            "riskScore": 0.8,
+            "startedAt": now_iso,
+            "durationSec": 2,
+            "capturedAt": now_iso,
+        },
+        headers=drv_hdr,
+    )
+    assert ev_blocked.status_code == 403
+    assert ev_blocked.json()["error"]["code"] == "CONSENT_REQUIRED"
+
+    # Accept Decree 13/2023 consent (even if client passes clipStorageConsent=True, server forces False per R1!)
+    consent_res = p1_client.post(
+        "/api/v1/auth/consent",
+        json={"version": "2026-01", "locationConsent": True, "clipStorageConsent": True},
+        headers=drv_hdr,
+    )
+    assert consent_res.status_code == 200
+    c_body = consent_res.json()
+    assert c_body["hasConsented"] is True
+    assert c_body["version"] == "2026-01"
+    assert c_body["clipStorageConsent"] is False
+
+    # Now heartbeat and event succeed!
+    hb_ok = p1_client.post(
+        f"/api/v1/sessions/{sess_id}/heartbeat",
+        json={
+            "state": "NORMAL",
+            "imageQuality": "GOOD",
+            "continuousDrivingSec": 30,
+            "vehicleMoving": True,
+            "capturedAt": now_iso,
+        },
+        headers=drv_hdr,
+    )
+    assert hb_ok.status_code == 200
+
+
+
 
 
 

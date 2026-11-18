@@ -148,6 +148,11 @@ function toContractState(result: AnalysisResult | null): ContractState {
   return result.state;
 }
 
+function hasDriverConsent(auth: DriverAuthSession | null): boolean {
+  if (!auth) return false;
+  return Boolean(auth.user.hasConsented || auth.consentedAt);
+}
+
 export function useDriverSync() {
   const initialAuth = readStoredAuth();
   const [auth, setAuth] = useState<DriverAuthSession | null>(initialAuth);
@@ -241,7 +246,7 @@ export function useDriverSync() {
   const flushNow = useCallback(async () => {
     const currentAuth = authRef.current;
     const url = serverUrlRef.current;
-    if (!currentAuth?.accessToken || !url) {
+    if (!currentAuth?.accessToken || !url || !hasDriverConsent(currentAuth) || currentAuth.user.mustChangePassword) {
       refreshPendingCount();
       return;
     }
@@ -316,15 +321,67 @@ export function useDriverSync() {
     const res = await m3Api.pairVehicle(currentAuth.accessToken, code.trim().toUpperCase(), serverUrlRef.current);
     const updated: DriverAuthSession = {
       ...currentAuth,
+      user: { ...currentAuth.user, hasConsented: true },
       vehicleName: res.vehicleName,
       organizationName: res.organizationName,
       consentedAt: new Date().toISOString(),
+      consentVersion: '2026-01',
     };
     authRef.current = updated;
     setAuth(updated);
     writeStoredAuth(updated);
     return updated;
   }, []);
+
+  const acceptConsent = useCallback(async (locationConsent: boolean): Promise<DriverAuthSession> => {
+    const currentAuth = authRef.current;
+    if (!currentAuth) {
+      throw new M3ApiError('Cần đăng nhập trước khi xác nhận đồng ý.', 401, 'UNAUTHORIZED');
+    }
+    const res = await m3Api.acceptConsent(
+      currentAuth.accessToken,
+      locationConsent,
+      '2026-01',
+      serverUrlRef.current,
+    );
+    const updated: DriverAuthSession = {
+      ...currentAuth,
+      user: { ...currentAuth.user, hasConsented: true },
+      consentedAt: res.acceptedAt ?? new Date().toISOString(),
+      consentVersion: res.version,
+      locationConsent: res.locationConsent,
+    };
+    authRef.current = updated;
+    setAuth(updated);
+    writeStoredAuth(updated);
+    setSyncError(null);
+    return updated;
+  }, []);
+
+  const changePassword = useCallback(
+    async (currentPassword: string, newPassword: string): Promise<DriverAuthSession> => {
+      const currentAuth = authRef.current;
+      if (!currentAuth) {
+        throw new M3ApiError('Cần đăng nhập trước khi đổi mật khẩu.', 401, 'UNAUTHORIZED');
+      }
+      const updatedUser = await m3Api.changePassword(
+        currentAuth.accessToken,
+        currentPassword,
+        newPassword,
+        serverUrlRef.current,
+      );
+      const updated: DriverAuthSession = {
+        ...currentAuth,
+        user: updatedUser,
+      };
+      authRef.current = updated;
+      setAuth(updated);
+      writeStoredAuth(updated);
+      setSyncError(null);
+      return updated;
+    },
+    [],
+  );
 
   const logout = useCallback(() => {
     const cur = authRef.current;
@@ -360,6 +417,7 @@ export function useDriverSync() {
     const currentAuth = authRef.current;
     const url = serverUrlRef.current;
     if (!sess || !currentAuth || modeRef.current !== 'online' || !url) return;
+    if (!hasDriverConsent(currentAuth) || currentAuth.user.mustChangePassword) return;
 
     const elapsedSec = Math.max(0, Math.floor((Date.now() - sess.startMs) / 1000));
     const location = sess.settings.shareLocation ? await readOptionalLocation() : null;
@@ -405,6 +463,10 @@ export function useDriverSync() {
 
   const queueAndFlushEvent = useCallback(
     (sess: ActiveSessionState, event: UpsertEventRequest) => {
+      const currentAuth = authRef.current;
+      if (!hasDriverConsent(currentAuth) || currentAuth?.user.mustChangePassword) {
+        return;
+      }
       enqueueEvent(sess.sessionId, sess.startedAt, event);
       refreshPendingCount();
       void flushNow();
@@ -450,7 +512,13 @@ export function useDriverSync() {
 
     const currentAuth = authRef.current;
     const url = serverUrlRef.current;
-    if (modeRef.current !== 'online' || !currentAuth?.accessToken || !url) {
+    if (
+      modeRef.current !== 'online' ||
+      !currentAuth?.accessToken ||
+      !url ||
+      !hasDriverConsent(currentAuth) ||
+      currentAuth.user.mustChangePassword
+    ) {
       sessionRef.current = null;
       return;
     }
@@ -774,6 +842,8 @@ export function useDriverSync() {
     saveAndTestServer,
     login,
     pairVehicle,
+    acceptConsent,
+    changePassword,
     logout,
     flushNow,
     startSession,

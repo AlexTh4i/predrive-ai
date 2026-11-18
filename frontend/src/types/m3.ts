@@ -21,6 +21,15 @@ export interface AuthUser {
   fullName: string;
   organizationId: string;
   mustChangePassword?: boolean;
+  hasConsented?: boolean;
+}
+
+export interface ConsentStatusResponse {
+  hasConsented: boolean;
+  version: string;
+  locationConsent: boolean;
+  clipStorageConsent: boolean;
+  acceptedAt?: string | null;
 }
 
 export interface LoginResponse {

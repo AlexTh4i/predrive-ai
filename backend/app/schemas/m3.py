@@ -81,6 +81,21 @@ class AuthUserSchema(CamelModel):
     fullName: str
     organizationId: str
     mustChangePassword: bool = False
+    hasConsented: bool = False
+
+
+class ConsentAcceptRequest(CamelModel):
+    version: str = Field(default="2026-01", min_length=1, max_length=32)
+    locationConsent: bool = True
+    clipStorageConsent: bool = False
+
+
+class ConsentStatusResponse(CamelModel):
+    hasConsented: bool
+    version: str
+    locationConsent: bool
+    clipStorageConsent: bool = False
+    acceptedAt: Optional[UtcDatetime] = None
 
 
 class LoginResponse(CamelModel):
