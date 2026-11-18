@@ -623,3 +623,23 @@ class RiskScoreItem(CamelModel):
     drivingHours: float
 
 
+class CreateWebhookRequest(CamelModel):
+    url: str = Field(min_length=8, max_length=1024)
+    events: list[Literal["alert.created", "alert.escalated"]] = Field(
+        default_factory=lambda: ["alert.created", "alert.escalated"], min_length=1
+    )
+    secret: Optional[str] = Field(default=None, min_length=16, max_length=256)
+
+
+class WebhookItem(CamelModel):
+    id: str
+    url: str
+    events: list[str]
+    isActive: bool
+    createdAt: UtcDatetime
+
+
+class WebhookCreatedResponse(WebhookItem):
+    secret: str
+
+

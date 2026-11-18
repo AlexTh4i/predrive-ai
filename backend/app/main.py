@@ -41,6 +41,7 @@ from .core.errors import register_error_handlers
 from .models.models import Organization
 from .routers import auth as auth_router
 from .routers import driver_app as driver_app_router
+from .routers import public_api as public_api_router
 from .routers import web_admin as web_admin_router
 from .schemas import AnalysisResult, FrameMessage, SessionResponse
 from .services.observability import (
@@ -272,10 +273,11 @@ async def production_security_middleware(request: Request, call_next):
         response, origin, cfg.cors_origins, cfg.is_production
     )
 
-# Mount M3 API routers
+# Mount M3 & Public Integration API routers
 app.include_router(auth_router.router)
 app.include_router(driver_app_router.router)
 app.include_router(web_admin_router.router)
+app.include_router(public_api_router.router)
 
 
 @app.get("/health")

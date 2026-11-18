@@ -29,6 +29,7 @@ from .mappers import (
 )
 from .notify import notify_user
 from .sse import sse_broker
+from .webhook_service import dispatch_webhooks_for_event
 
 STATUS_RANK: dict[str, int] = {
     "OPEN": 1,
@@ -279,6 +280,9 @@ def upsert_session_event(
             )
         )
 
+    is_new_event = False
+    entered_escalated = False
+
     if existing is not None:
         if (
             existing.session_id != session_obj.id
@@ -289,7 +293,10 @@ def upsert_session_event(
                 "EVENT_CONFLICT",
                 "eventId already belongs to a different session",
             )
+        prev_status = existing.status
         ev, incoming_delayed = _merge_existing_event(existing, session_obj, payload, now)
+        if prev_status != "ESCALATED" and ev.status == "ESCALATED":
+            entered_escalated = True
     else:
         lvl_int = _resolve_incoming_level(payload)
         try:
@@ -328,6 +335,9 @@ def upsert_session_event(
                 )
                 usage_row.alerts_total += 1
                 db.flush()
+                is_new_event = True
+                if ev.status == "ESCALATED":
+                    entered_escalated = True
         except IntegrityError:
             existing = db.get(EventModel, resolved_id) or db.scalar(
                 select(EventModel).where(
@@ -341,7 +351,10 @@ def upsert_session_event(
                     "EVENT_CONFLICT",
                     "Concurrent event conflict",
                 )
+            prev_status = existing.status
             ev, incoming_delayed = _merge_existing_event(existing, session_obj, payload, now)
+            if prev_status != "ESCALATED" and ev.status == "ESCALATED":
+                entered_escalated = True
 
     _sync_event_location(db, ev, session_obj, driver, payload, captured_utc)
 
@@ -420,5 +433,15 @@ def upsert_session_event(
                             body=f"{ev.type} ({vehicle_name})",
                             meta={"eventId": ev.id, "driverId": driver.id},
                         )
+
+            alert_payload = alert_schema.model_dump(mode="json")
+            if is_new_event:
+                dispatch_webhooks_for_event(
+                    db, driver.organization_id, "alert.created", alert_payload
+                )
+            if entered_escalated:
+                dispatch_webhooks_for_event(
+                    db, driver.organization_id, "alert.escalated", alert_payload
+                )
 
     return alert_schema, incoming_delayed

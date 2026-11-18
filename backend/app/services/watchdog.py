@@ -32,6 +32,7 @@ from .mappers import (
 from .notify import notify_user
 from .risk_report_service import compute_organization_risk_scores
 from .sse import sse_broker
+from .webhook_service import dispatch_webhooks_for_event
 
 logger = logging.getLogger("predrive.watchdog")
 
@@ -278,10 +279,14 @@ def check_pending_escalations(
             db.flush()
         if status_changed:
             alert_schema = event_to_schema(ev, driver_name, vehicle_name)
+            alert_json = alert_schema.model_dump(mode="json")
             sse_broker.publish(
                 ev.organization_id,
                 "alert",
-                alert_schema.model_dump(mode="json"),
+                alert_json,
+            )
+            dispatch_webhooks_for_event(
+                db, ev.organization_id, "alert.escalated", alert_json
             )
 
     if created_escalations:
