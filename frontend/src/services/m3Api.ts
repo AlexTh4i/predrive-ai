@@ -1,10 +1,12 @@
 import { CapacitorHttp } from '@capacitor/core';
 import { getServerUrl, isNativeApp, normalizeServerUrl } from '../config/env';
 import type {
+  AlertEventResponse,
   AuthUser,
   BatchEventsResponse,
   ConsentStatusResponse,
   CreateSessionResponse,
+  DriverFeedbackValue,
   DriverSettings,
   EndSessionRequest,
   HeartbeatRequest,
@@ -373,6 +375,24 @@ export const m3Api = {
       body: { events },
       serverUrl,
     });
+  },
+
+  postEventFeedback(
+    token: string,
+    sessionId: string,
+    eventId: string,
+    feedback: DriverFeedbackValue,
+    serverUrl?: string,
+  ): Promise<AlertEventResponse> {
+    return requestJson(
+      `/api/v1/sessions/${encodeURIComponent(sessionId)}/events/${encodeURIComponent(eventId)}/feedback`,
+      {
+        method: 'POST',
+        token,
+        body: { feedback },
+        serverUrl,
+      },
+    );
   },
 
   endSession(

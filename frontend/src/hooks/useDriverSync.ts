@@ -15,6 +15,7 @@ import { DEFAULT_DRIVER_SETTINGS } from '../types/m3';
 import type {
   ContractState,
   DriverAuthSession,
+  DriverFeedbackValue,
   DriverMode,
   DriverSettings,
   EventLevel,
@@ -180,6 +181,7 @@ export function useDriverSync() {
   const [syncError, setSyncError] = useState<string | null>(null);
   const [settings, setSettings] = useState<DriverSettings>(DEFAULT_DRIVER_SETTINGS);
   const [restReminder, setRestReminder] = useState<RestReminderPayload | null>(null);
+  const [lastAlertEvent, setLastAlertEvent] = useState<{ sessionId: string; eventId: string } | null>(null);
 
   const authRef = useRef(auth);
   const modeRef = useRef(mode);
@@ -537,6 +539,7 @@ export function useDriverSync() {
           }
         : event;
       enqueueEvent(sess.sessionId, sess.startedAt, enriched);
+      setLastAlertEvent({ sessionId: sess.sessionId, eventId: enriched.eventId });
       refreshPendingCount();
       void flushNow();
     },
@@ -894,11 +897,32 @@ export function useDriverSync() {
         warningCount: sess.warningCount,
         criticalCount: sess.criticalCount,
         unavailableSec: sess.unavailableSec,
+        monitoringOffCount: 1,
       },
     });
     refreshPendingCount();
     await flushNow();
   }, [clearTimers, closeEpisode, flushNow, refreshPendingCount]);
+
+  const submitEventFeedback = useCallback(async (feedback: DriverFeedbackValue): Promise<void> => {
+    const target = lastAlertEvent;
+    setLastAlertEvent(null);
+    const currentAuth = authRef.current;
+    const url = serverUrlRef.current;
+    if (!target || !currentAuth?.accessToken || !url || modeRef.current !== 'online') return;
+    try {
+      await flushNow();
+      await m3Api.postEventFeedback(
+        currentAuth.accessToken,
+        target.sessionId,
+        target.eventId,
+        feedback,
+        url,
+      );
+    } catch {
+      // Bỏ qua nếu đang ngoại tuyến
+    }
+  }, [flushNow, lastAlertEvent]);
 
   // Kiểm tra token khi mở app và tự động flush hàng đợi offline khi có mạng lại
   useEffect(() => {
@@ -956,6 +980,8 @@ export function useDriverSync() {
     syncError,
     settings,
     restReminder,
+    lastAlertEvent,
+    submitEventFeedback,
     saveAndTestServer,
     login,
     pairVehicle,

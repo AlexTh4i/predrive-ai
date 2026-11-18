@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from ..core.errors import AppError
 from ..models.models import (
+    AppUsageDaily,
     Consent,
     EventModel,
     LocationModel,
@@ -23,6 +24,7 @@ from .mappers import (
     ensure_utc,
     event_to_schema,
     get_or_create_org_settings,
+    to_vn_time,
 )
 from .sse import sse_broker
 
@@ -48,6 +50,32 @@ def _resolve_event_uuid(session_id: str, raw_event_id: str) -> str:
         return str(UUID(str(raw_event_id)))
     except ValueError:
         return str(uuid5(NAMESPACE_DNS, f"{session_id}:{raw_event_id}"))
+
+
+def get_or_create_daily_usage(
+    db: Session, org_id: str, driver_id: str, ref_utc: datetime
+) -> AppUsageDaily:
+    usage_day = to_vn_time(ref_utc).date()
+    row = db.scalar(
+        select(AppUsageDaily).where(
+            AppUsageDaily.organization_id == org_id,
+            AppUsageDaily.driver_id == driver_id,
+            AppUsageDaily.usage_date == usage_day,
+        )
+    )
+    if row is None:
+        row = AppUsageDaily(
+            organization_id=org_id,
+            driver_id=driver_id,
+            usage_date=usage_day,
+            monitored_minutes=0,
+            monitoring_off_count=0,
+            alerts_total=0,
+            alerts_false=0,
+        )
+        db.add(row)
+        db.flush()
+    return row
 
 
 def classify_alert_level_from_settings(duration_sec: float, org_settings: OrgSettings) -> int:
@@ -293,6 +321,10 @@ def upsert_session_event(
                     session_obj.critical_count += 1
                 else:
                     session_obj.warning_count += 1
+                usage_row = get_or_create_daily_usage(
+                    db, driver.organization_id, driver.id, started_utc
+                )
+                usage_row.alerts_total += 1
                 db.flush()
         except IntegrityError:
             existing = db.get(EventModel, resolved_id) or db.scalar(

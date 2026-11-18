@@ -2,7 +2,8 @@ import { useCallback, useMemo, useState } from 'react';
 import { BarChart3, CalendarDays, EyeOff, Moon, WifiOff } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { api } from '../api';
-import { HourlyAlertChart, TrendChart } from '../components/Charts';
+import { ApiError } from '../api/contract';
+import { AlarmFatigueChart, HourlyAlertChart, TrendChart } from '../components/Charts';
 import { StatTile } from '../components/StatTile';
 import { Avatar, Empty, ErrorState, Loading, PageHeading, SectionHeading } from '../components/ui';
 import { useClock } from '../hooks/useClock';
@@ -28,6 +29,15 @@ export function Stats() {
     }));
   }, [today, group]);
   const trend = useResource(loadTrend);
+  const loadFatigue = useCallback(async (signal: AbortSignal) => {
+    try {
+      return await api.getAlarmFatigue(signal);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 404) return [];
+      throw err;
+    }
+  }, []);
+  const fatigue = useResource(loadFatigue);
   const ranking = useMemo(() => rankingResult.data?.slice().sort((a, b) =>
     b.alertsPerDrivingHour - a.alertsPerDrivingHour || b.alertCount - a.alertCount), [rankingResult.data]);
   return (
@@ -81,6 +91,26 @@ export function Stats() {
           </table>
         </div> : <Empty title="Chưa có dữ liệu xếp hạng" description="Xếp hạng sẽ xuất hiện khi có dữ liệu lái xe." />)}
       </section>
+      {fatigue.data && fatigue.data.length > 0 && (
+        <section className="card panel page-section" aria-label="Nhờn cảnh báo 7 ngày">
+          <SectionHeading
+            title="Nhờn cảnh báo & tắt giám sát (7 ngày)"
+            description="Tỉ lệ tắt giám sát trên mỗi giờ lái và % cảnh báo do tài xế phản hồi báo sai (v_driver_usage_7d)"
+          />
+          <AlarmFatigueChart data={fatigue.data} />
+          <ul className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+            {fatigue.data.map((item) => (
+              <li key={item.driverId} className="rounded-xl border border-slate-200 p-2.5 text-xs">
+                <div className="font-semibold text-slate-900">{item.fullName}</div>
+                <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-slate-600">
+                  <span>Tắt/giờ: <strong>{formatNumber(item.offPerHour)}</strong></span>
+                  <span>Báo sai: <strong>{formatNumber(item.falseAlertPct)}%</strong> ({item.alertsFalse}/{item.alertsTotal})</span>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
     </>
   );
 }
