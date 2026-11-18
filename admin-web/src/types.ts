@@ -17,10 +17,13 @@ export interface User {
   role: Role;
   fullName: string;
   organizationId: string;
+  mustChangePassword?: boolean;
 }
 
 export interface LoginResult {
   accessToken: string;
+  refreshToken?: string;
+  expiresIn?: number;
   user: User;
 }
 
@@ -31,6 +34,7 @@ export interface Driver {
   vehicleId: string;
   vehicleName: string;
   avatarUrl: string | null;
+  temporaryPassword?: string | null;
 }
 
 export interface LiveDriverState {

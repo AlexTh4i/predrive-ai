@@ -80,11 +80,27 @@ class AuthUserSchema(CamelModel):
     role: UserRole
     fullName: str
     organizationId: str
+    mustChangePassword: bool = False
 
 
 class LoginResponse(CamelModel):
     accessToken: str
+    refreshToken: Optional[str] = None
+    expiresIn: int = 900
     user: AuthUserSchema
+
+
+class RefreshTokenRequest(CamelModel):
+    refreshToken: str = Field(min_length=1)
+
+
+class LogoutRequest(CamelModel):
+    refreshToken: Optional[str] = None
+
+
+class ChangePasswordRequest(CamelModel):
+    currentPassword: str = Field(min_length=1)
+    newPassword: str = Field(min_length=8, max_length=128)
 
 
 class PairRequest(CamelModel):
@@ -173,6 +189,7 @@ class DriverSchema(CamelModel):
     vehicleId: Optional[str] = None
     vehicleName: str
     avatarUrl: Optional[str] = None
+    temporaryPassword: Optional[str] = None
 
 
 class SessionSchema(CamelModel):
