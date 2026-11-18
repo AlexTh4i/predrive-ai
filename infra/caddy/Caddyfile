@@ -1,0 +1,28 @@
+{
+	admin 0.0.0.0:2019
+}
+
+{$DOMAIN:localhost} {
+	encode zstd gzip
+
+	# Forward API + SSE + health to FastAPI backend with zero buffering for SSE (/api/v1/live/stream)
+	@backend_routes {
+		path /api/* /health
+	}
+	handle @backend_routes {
+		reverse_proxy backend:8000 {
+			flush_interval -1
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	# Serve Web Admin SPA for all remaining routes
+	handle {
+		reverse_proxy admin-web:80
+	}
+}
+
+{$GRAFANA_DOMAIN:grafana.localhost} {
+	encode zstd gzip
+	reverse_proxy grafana:3000
+}
