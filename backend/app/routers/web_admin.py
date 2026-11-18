@@ -61,6 +61,7 @@ from ..schemas.m3 import (
     LocationTrailAlertPin,
     LocationTrailPoint,
     LocationTrailResponse,
+    NearestRestStopItem,
     PaginatedAuditLogsResponse,
     PaginatedEventsResponse,
     PairingCodeResponse,
@@ -81,6 +82,7 @@ from ..services.mappers import (
     to_vn_time,
 )
 from ..services.sse import sse_broker
+from ..services.rest_service import find_nearest_rest_stops
 
 router = APIRouter(prefix="/api/v1", tags=["Web Admin & Dispatcher"])
 
@@ -1441,3 +1443,15 @@ def get_location_trail(
         points=points,
         alerts=alerts,
     )
+
+
+@router.get("/rest-stops/nearest", response_model=list[NearestRestStopItem])
+def get_nearest_rest_stops_endpoint(
+    lat: float = Query(ge=-90.0, le=90.0),
+    lng: float = Query(ge=-180.0, le=180.0),
+    limit: int = Query(default=5, ge=1, le=20),
+    current_user: User = Depends(require_roles("manager", "dispatcher", "driver")),
+    db: Session = Depends(get_db),
+) -> list[NearestRestStopItem]:
+    org_id = get_jwt_org_id(current_user)
+    return find_nearest_rest_stops(db, org_id, lat=lat, lng=lng, limit=limit)

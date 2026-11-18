@@ -225,11 +225,56 @@ class HeartbeatRequest(CamelModel):
     location: Optional[HeartbeatLocationInput] = None
 
 
+class NearestRestStopItem(CamelModel):
+    id: str
+    name: str
+    stopType: str
+    lat: float
+    lng: float
+    distanceKm: float
+    open24h: bool = False
+    hasTruckParking: bool = True
+
+
+class RestReminderPayload(CamelModel):
+    shouldRest: bool = True
+    overMaxLimit: bool = False
+    continuousDrivingMin: float
+    maxContinuousDriveMin: int
+    minRestMin: int
+    remainingMin: int
+    suggestedStops: list[NearestRestStopItem] = Field(default_factory=list)
+
+
+class RestBreakStartRequest(CamelModel):
+    startedAt: Optional[UtcDatetime] = None
+    lat: Optional[float] = Field(default=None, ge=-90.0, le=90.0)
+    lng: Optional[float] = Field(default=None, ge=-180.0, le=180.0)
+    suggestedStopId: Optional[str] = None
+
+
+class RestBreakEndRequest(CamelModel):
+    endedAt: Optional[UtcDatetime] = None
+
+
+class RestBreakItem(CamelModel):
+    id: str
+    sessionId: Optional[str] = None
+    driverId: str
+    driveMinBefore: int
+    suggestedStopId: Optional[str] = None
+    startedAt: UtcDatetime
+    endedAt: Optional[UtcDatetime] = None
+    restedMin: Optional[float] = None
+    qualifiedReset: Optional[bool] = None
+
+
 class HeartbeatResponse(CamelModel):
     status: str = "ok"
     state: ContractState
     receivedAt: UtcDatetime
     settings: Optional[SettingsSchema] = None
+    restReminder: Optional[RestReminderPayload] = None
 
 
 class EndSessionSummary(CamelModel):

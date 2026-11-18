@@ -19,6 +19,7 @@ import type {
   DriverSettings,
   EventLevel,
   HeartbeatLocation,
+  RestReminderPayload,
   UpsertEventRequest,
 } from '../types/m3';
 
@@ -178,6 +179,7 @@ export function useDriverSync() {
   });
   const [syncError, setSyncError] = useState<string | null>(null);
   const [settings, setSettings] = useState<DriverSettings>(DEFAULT_DRIVER_SETTINGS);
+  const [restReminder, setRestReminder] = useState<RestReminderPayload | null>(null);
 
   const authRef = useRef(auth);
   const modeRef = useRef(mode);
@@ -491,6 +493,7 @@ export function useDriverSync() {
         sess.settings = hbRes.settings;
         setSettings(hbRes.settings);
       }
+      setRestReminder(hbRes.restReminder ?? null);
       if (loadOfflineQueue().length > 0) {
         void flushNow();
       } else {
@@ -952,6 +955,7 @@ export function useDriverSync() {
     syncStatus,
     syncError,
     settings,
+    restReminder,
     saveAndTestServer,
     login,
     pairVehicle,
