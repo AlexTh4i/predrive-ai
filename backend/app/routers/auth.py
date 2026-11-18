@@ -113,6 +113,7 @@ def pair_driver_vehicle(
         pairing.vehicle_id = vehicle.id
 
     pairing.driver_id = current_user.id
+    pairing.used_at = now
     pairing.consented_at = now
     pairing.status = "PAIRED"
     db.commit()

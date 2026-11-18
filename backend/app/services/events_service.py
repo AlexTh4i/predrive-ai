@@ -1,11 +1,19 @@
 from datetime import datetime, timezone
+from uuid import NAMESPACE_DNS, UUID, uuid5
 
 from fastapi import status
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..core.errors import AppError
-from ..models.models import EventModel, SessionModel, User, Vehicle
+from ..models.models import (
+    EventModel,
+    SessionModel,
+    User,
+    Vehicle,
+    level_str_to_int,
+)
 from ..schemas.m3 import AlertEvent, UpsertEventRequest
 from .mappers import (
     build_live_driver_state,
@@ -13,11 +21,6 @@ from .mappers import (
     event_to_schema,
 )
 from .sse import sse_broker
-
-LEVEL_RANK: dict[str, int] = {
-    "WARNING": 1,
-    "CRITICAL": 2,
-}
 
 STATUS_RANK: dict[str, int] = {
     "OPEN": 1,
@@ -36,6 +39,13 @@ STATE_SEVERITY: dict[str, int] = {
 }
 
 
+def _resolve_event_uuid(session_id: str, raw_event_id: str) -> str:
+    try:
+        return str(UUID(str(raw_event_id)))
+    except ValueError:
+        return str(uuid5(NAMESPACE_DNS, f"{session_id}:{raw_event_id}"))
+
+
 def _merge_existing_event(
     existing: EventModel,
     session_obj: SessionModel,
@@ -49,34 +59,45 @@ def _merge_existing_event(
     started_utc = ensure_utc(payload.startedAt) or captured_utc
     incoming_delayed = (now_utc - captured_utc).total_seconds() > 60.0
 
-    old_level = existing.level
-    if LEVEL_RANK.get(payload.level, 1) > LEVEL_RANK.get(existing.level, 1):
-        existing.level = payload.level
-        if old_level == "WARNING" and existing.level == "CRITICAL":
+    incoming_lvl_int = level_str_to_int(payload.level)
+    old_lvl_int = existing.level
+    metrics = dict(existing.metrics or {})
+
+    if incoming_lvl_int > old_lvl_int:
+        existing.level = incoming_lvl_int
+        metrics["api_level"] = payload.level
+        if old_lvl_int < 3 and incoming_lvl_int >= 3:
             session_obj.warning_count = max(0, session_obj.warning_count - 1)
             session_obj.critical_count += 1
 
     if STATUS_RANK.get(payload.status, 1) > STATUS_RANK.get(existing.status, 1):
         existing.status = payload.status
+        if payload.status == "ESCALATED" and existing.escalated_at is None:
+            existing.escalated_at = now_utc
+        elif payload.status == "CLOSED" and existing.closed_at is None:
+            existing.closed_at = captured_utc
 
     if STATE_SEVERITY.get(payload.state, 0) >= STATE_SEVERITY.get(existing.state, 0):
-        existing.state = payload.state
+        metrics["state"] = payload.state
 
-    existing.duration_sec = max(existing.duration_sec, payload.durationSec)
+    metrics["duration_sec"] = max(int(metrics.get("duration_sec") or 0), payload.durationSec)
 
-    existing_started = ensure_utc(existing.started_at) or started_utc
+    existing_started = ensure_utc(existing.occurred_at) or started_utc
     if started_utc < existing_started:
-        existing.started_at = started_utc
+        existing.occurred_at = started_utc
 
     existing_captured = ensure_utc(existing.captured_at) or captured_utc
     if captured_utc >= existing_captured:
-        existing.captured_at = captured_utc
+        metrics["captured_at"] = captured_utc.isoformat()
 
     if payload.riskScore is not None:
-        if existing.risk_score is None:
-            existing.risk_score = payload.riskScore
+        cur_risk = metrics.get("risk_score")
+        if cur_risk is None:
+            metrics["risk_score"] = payload.riskScore
         else:
-            existing.risk_score = max(existing.risk_score, payload.riskScore)
+            metrics["risk_score"] = max(float(cur_risk), payload.riskScore)
+
+    existing.metrics = metrics
 
     # Preserve non-delayed flag if it was originally received in real time
     if existing.delayed and not incoming_delayed:
@@ -101,7 +122,17 @@ def upsert_session_event(
     started_utc = ensure_utc(payload.startedAt) or captured_utc
     incoming_delayed = (now - captured_utc).total_seconds() > 60.0
 
-    existing = db.get(EventModel, payload.eventId)
+    resolved_id = _resolve_event_uuid(session_obj.id, payload.eventId)
+
+    existing = db.get(EventModel, resolved_id)
+    if existing is None:
+        existing = db.scalar(
+            select(EventModel).where(
+                EventModel.session_id == session_obj.id,
+                EventModel.client_event_id == payload.eventId,
+            )
+        )
+
     if existing is not None:
         if (
             existing.session_id != session_obj.id
@@ -114,33 +145,45 @@ def upsert_session_event(
             )
         ev, incoming_delayed = _merge_existing_event(existing, session_obj, payload, now)
     else:
+        lvl_int = level_str_to_int(payload.level)
         try:
             with db.begin_nested():
                 ev = EventModel(
-                    id=payload.eventId,
+                    id=resolved_id,
                     organization_id=driver.organization_id,
                     session_id=session_obj.id,
                     driver_id=driver.id,
                     vehicle_id=session_obj.vehicle_id or driver.vehicle_id,
+                    client_event_id=payload.eventId,
                     type=payload.type,
-                    level=payload.level,
+                    level=lvl_int,
                     status=payload.status,
-                    state=payload.state,
-                    risk_score=payload.riskScore,
-                    started_at=started_utc,
-                    duration_sec=payload.durationSec,
                     delayed=incoming_delayed,
-                    captured_at=captured_utc,
-                    received_at=now,
+                    occurred_at=started_utc,
+                    escalated_at=now if payload.status == "ESCALATED" else None,
+                    closed_at=captured_utc if payload.status == "CLOSED" else None,
+                    created_at=now,
+                    metrics={
+                        "api_level": payload.level,
+                        "state": payload.state,
+                        "risk_score": payload.riskScore,
+                        "duration_sec": payload.durationSec,
+                        "captured_at": captured_utc.isoformat(),
+                    },
                 )
                 db.add(ev)
-                if payload.level == "CRITICAL":
+                if lvl_int >= 3:
                     session_obj.critical_count += 1
                 else:
                     session_obj.warning_count += 1
                 db.flush()
         except IntegrityError:
-            existing = db.get(EventModel, payload.eventId)
+            existing = db.get(EventModel, resolved_id) or db.scalar(
+                select(EventModel).where(
+                    EventModel.session_id == session_obj.id,
+                    EventModel.client_event_id == payload.eventId,
+                )
+            )
             if existing is None or existing.session_id != session_obj.id:
                 raise AppError(
                     status.HTTP_409_CONFLICT,
@@ -171,7 +214,14 @@ def upsert_session_event(
         if v_obj:
             vehicle_name = v_obj.name
 
-    alert_schema = event_to_schema(ev, driver.full_name, vehicle_name)
+    ack_by_name = None
+    if ev.ack_by:
+        ack_user = db.get(User, ev.ack_by)
+        ack_by_name = ack_user.full_name if ack_user else (ev.metrics or {}).get("ack_by_name")
+    elif (ev.metrics or {}).get("ack_by_name"):
+        ack_by_name = (ev.metrics or {}).get("ack_by_name")
+
+    alert_schema = event_to_schema(ev, driver.full_name, vehicle_name, ack_by_name=ack_by_name)
 
     if publish_sse:
         live_state = build_live_driver_state(db, driver)
@@ -189,4 +239,3 @@ def upsert_session_event(
             )
 
     return alert_schema, incoming_delayed
-

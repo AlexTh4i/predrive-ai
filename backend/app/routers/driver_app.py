@@ -146,6 +146,7 @@ async def create_or_resume_session(
     ).all()
     for old_sess in prev_open:
         old_sess.ended_at = started_utc
+        old_sess.status = "ended"
         old_sess.current_state = "OFFLINE"
 
     try:
@@ -155,6 +156,7 @@ async def create_or_resume_session(
                 organization_id=current_user.organization_id,
                 driver_id=current_user.id,
                 vehicle_id=current_user.vehicle_id,
+                status="active",
                 started_at=started_utc,
                 ended_at=None,
                 total_driving_sec=0,
@@ -253,12 +255,14 @@ def post_session_heartbeat(
         state=payload.state,
         image_quality=payload.imageQuality,
         vehicle_moving=payload.vehicleMoving,
-        captured_at=captured_utc,
+        ts=captured_utc,
+        lat=payload.location.lat if payload.location else None,
+        lng=payload.location.lng if payload.location else None,
     )
     db.add(hb)
 
     # Auto-recover if session was DISCONNECTED
-    if sess.current_state == "DISCONNECTED":
+    if sess.current_state == "DISCONNECTED" or sess.status == "disconnected":
         open_disc_events = db.scalars(
             select(EventModel).where(
                 EventModel.session_id == sess.id,
@@ -268,6 +272,9 @@ def post_session_heartbeat(
         ).all()
         for disc_ev in open_disc_events:
             disc_ev.status = "CLOSED"
+            disc_ev.closed_at = now
+        if sess.ended_at is None:
+            sess.status = "active"
 
     sess.current_state = payload.state
     sess.continuous_driving_sec = payload.continuousDrivingSec
@@ -283,10 +290,11 @@ def post_session_heartbeat(
             LocationModel(
                 organization_id=current_user.organization_id,
                 session_id=sess.id,
+                vehicle_id=sess.vehicle_id or current_user.vehicle_id,
                 driver_id=current_user.id,
                 lat=payload.location.lat,
                 lng=payload.location.lng,
-                captured_at=loc_at or now,
+                ts=loc_at or now,
             )
         )
 
@@ -320,6 +328,7 @@ def end_session(
     ended_utc = ensure_utc(payload.endedAt) or datetime.now(timezone.utc)
 
     sess.ended_at = ended_utc
+    sess.status = "ended"
     sess.total_driving_sec = max(sess.total_driving_sec, payload.summary.totalDrivingSec)
     sess.warning_count = max(sess.warning_count, payload.summary.warningCount)
     sess.critical_count = max(sess.critical_count, payload.summary.criticalCount)
@@ -335,6 +344,7 @@ def end_session(
     ).all()
     for ev in open_events:
         ev.status = "CLOSED"
+        ev.closed_at = ended_utc
 
     db.commit()
     db.refresh(sess)

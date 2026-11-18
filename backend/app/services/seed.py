@@ -63,21 +63,13 @@ def seed_database(db: Session, ref_now_utc: datetime | None = None) -> dict[str,
         db.flush()
 
     # 2. Settings
-    settings_id = det_uuid("settings-org-1")
-    settings = db.get(OrgSettings, settings_id)
-    if settings is None:
-        from sqlalchemy import select
-
-        settings = db.scalar(
-            select(OrgSettings).where(OrgSettings.organization_id == ORG_ID)
-        )
+    settings = db.get(OrgSettings, ORG_ID)
     if settings is None:
         settings = OrgSettings(
-            id=settings_id,
             organization_id=ORG_ID,
             continuous_warn_sec=7200,
             continuous_critical_sec=10800,
-            rest_reset_min=15,
+            min_rest_min=15,
             share_location=False,
             heartbeat_interval_sec=30,
             updated_at=now_utc,
@@ -274,7 +266,8 @@ def seed_database(db: Session, ref_now_utc: datetime | None = None) -> dict[str,
                     warn_cnt += 1
 
                 is_acked = rng.random() < 0.8
-                ack_by = "Trần Thị Trực Ban" if is_acked else None
+                ack_by = disp_id if is_acked else None
+                ack_by_name = "Trần Thị Trực Ban" if is_acked else None
                 ack_at = (ev_time_utc + timedelta(minutes=rng.randint(1, 5))) if is_acked else None
                 note = "Đã gọi điện nhắc tài xế vào trạm dừng nghỉ" if is_acked else None
 
@@ -284,17 +277,20 @@ def seed_database(db: Session, ref_now_utc: datetime | None = None) -> dict[str,
                     session_id=sess_id,
                     driver_id=d_id,
                     vehicle_id=v_id,
+                    client_event_id=ev_id,
                     type=ev_type,
                     level=ev_level,
                     status="CLOSED",
                     state=ev_state,
                     risk_score=risk_score,
                     started_at=ev_time_utc,
+                    closed_at=ev_time_utc + timedelta(seconds=duration_sec),
                     duration_sec=duration_sec,
                     delayed=False,
                     captured_at=ev_time_utc + timedelta(seconds=duration_sec),
                     received_at=ev_time_utc + timedelta(seconds=duration_sec + 1),
                     ack_by=ack_by,
+                    ack_by_name=ack_by_name,
                     ack_at=ack_at,
                     note=note,
                 )
