@@ -282,6 +282,27 @@ class EndSessionSummary(CamelModel):
     warningCount: int = Field(ge=0)
     criticalCount: int = Field(ge=0)
     unavailableSec: int = Field(ge=0)
+    monitoringOffCount: int = Field(default=1, ge=0)
+
+
+class DriverFeedbackRequest(CamelModel):
+    feedback: Literal["correct", "false_alarm"]
+
+
+class SessionUsageReportRequest(CamelModel):
+    monitoredMinutesDelta: int = Field(default=0, ge=0, le=1440)
+    monitoringOffDelta: int = Field(default=0, ge=0, le=500)
+
+
+class DriverUsage7dItem(CamelModel):
+    driverId: str
+    fullName: str
+    monitoredMinutes: int
+    monitoringOffCount: int
+    alertsTotal: int
+    alertsFalse: int
+    offPerHour: float
+    falseAlertPct: float
 
 
 class EndSessionRequest(CamelModel):

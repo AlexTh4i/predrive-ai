@@ -1,5 +1,5 @@
 import type {
-  AlertEvent, CreateDriverPayload, CreatePairingCodePayload, DateRange, Driver, DriverDetail, DriverStats, EventPage, EventQuery,
+  AlertEvent, CreateDriverPayload, CreatePairingCodePayload, DateRange, Driver, DriverDetail, DriverStats, DriverUsage7d, EventPage, EventQuery,
   HourlyStats, LiveDriverState, LiveVehicleLocation, LocationTrailResponse, LoginResult, PairingCodeResult, RankingEntry, Settings, SystemHealth, User,
 } from '../types';
 
@@ -41,6 +41,7 @@ export interface AdminApi {
   updateSettings(settings: Settings): Promise<Settings>;
   getLiveLocations(signal?: AbortSignal): Promise<LiveVehicleLocation[]>;
   getLocationTrail(query: { driverId?: string; sessionId?: string; from?: string; to?: string }, signal?: AbortSignal): Promise<LocationTrailResponse>;
+  getAlarmFatigue(signal?: AbortSignal): Promise<DriverUsage7d[]>;
 }
 
 export const defaultSettings: Settings = {

@@ -175,4 +175,5 @@ export const httpApi: AdminApi = {
   updateSettings: (settings) => request('/settings', { method: 'PUT', body: JSON.stringify(settings) }),
   getLiveLocations: (signal) => request('/locations/live', { signal }),
   getLocationTrail: (query, signal) => request(`/locations/trail${queryString(query)}`, { signal }),
+  getAlarmFatigue: (signal) => request('/stats/alarm-fatigue', { signal }),
 };

@@ -356,4 +356,26 @@ export const mockApi: AdminApi = {
       alerts,
     };
   },
+  async getAlarmFatigue(signal) {
+    await pause(signal);
+    operator();
+    return demoDrivers.map((drv, idx) => {
+      const monitoredMinutes = 420 + idx * 55;
+      const monitoringOffCount = (idx % 3) + 1;
+      const alertsTotal = 8 + idx * 2;
+      const alertsFalse = idx % 4;
+      const offPerHour = Number((monitoringOffCount / (monitoredMinutes / 60)).toFixed(2));
+      const falseAlertPct = Number(((100 * alertsFalse) / alertsTotal).toFixed(1));
+      return {
+        driverId: drv.id,
+        fullName: drv.fullName,
+        monitoredMinutes,
+        monitoringOffCount,
+        alertsTotal,
+        alertsFalse,
+        offPerHour,
+        falseAlertPct,
+      };
+    });
+  },
 };

@@ -24,6 +24,7 @@ from ..core.security import (
 )
 from ..models.models import (
     ApiKey,
+    AppUsageDaily,
     AuditLog,
     Escalation,
     EscalationPolicy,
@@ -46,9 +47,11 @@ from ..schemas.m3 import (
     CreateDriverRequest,
     CreatePairingCodeRequest,
     DriverDetailResponse,
+    DriverFeedbackRequest,
     DriverRankingItem,
     DriverSchema,
     DriverStatsResponse,
+    DriverUsage7dItem,
     EscalationItem,
     EscalationPolicyItem,
     EventLevel,
@@ -1455,3 +1458,104 @@ def get_nearest_rest_stops_endpoint(
 ) -> list[NearestRestStopItem]:
     org_id = get_jwt_org_id(current_user)
     return find_nearest_rest_stops(db, org_id, lat=lat, lng=lng, limit=limit)
+
+
+# --- ALARM FATIGUE & APP USAGE 7D (P3-4) ---
+@router.post("/events/{id}/feedback", response_model=AlertEvent)
+def post_event_feedback_direct(
+    id: str,
+    payload: DriverFeedbackRequest,
+    current_user: User = Depends(require_roles("driver", "dispatcher", "manager")),
+    db: Session = Depends(get_db),
+) -> AlertEvent:
+    from ..services.events_service import get_or_create_daily_usage
+
+    org_id = get_jwt_org_id(current_user)
+    ev = db.get(EventModel, id)
+    if ev is None or ev.organization_id != org_id:
+        raise AppError(
+            status.HTTP_404_NOT_FOUND,
+            "EVENT_NOT_FOUND",
+            "Không tìm thấy sự kiện cảnh báo trong tổ chức",
+        )
+    if current_user.role == "driver" and ev.driver_id != current_user.id:
+        raise AppError(
+            status.HTTP_403_FORBIDDEN,
+            "FORBIDDEN",
+            "Tài xế chỉ được gửi phản hồi cho cảnh báo của chính mình",
+        )
+
+    old_fb = ev.driver_feedback
+    ev.driver_feedback = payload.feedback
+    usage = get_or_create_daily_usage(
+        db, org_id, ev.driver_id, ensure_utc(ev.occurred_at) or datetime.now(timezone.utc)
+    )
+    if old_fb != "false_alarm" and payload.feedback == "false_alarm":
+        usage.alerts_false += 1
+        if usage.alerts_total < usage.alerts_false:
+            usage.alerts_total = usage.alerts_false
+    elif old_fb == "false_alarm" and payload.feedback == "correct":
+        usage.alerts_false = max(0, usage.alerts_false - 1)
+
+    db.commit()
+    db.refresh(ev)
+
+    drv = db.get(User, ev.driver_id)
+    d_name = drv.full_name if drv else "Tài xế"
+    vehicle_map = get_vehicle_name_map(db, org_id)
+    v_id = ev.vehicle_id or (drv.vehicle_id if drv else None)
+    v_name = vehicle_map.get(v_id, "Chưa phân xe") if v_id else "Chưa phân xe"
+    return event_to_schema(ev, d_name, v_name)
+
+
+@router.get("/stats/alarm-fatigue", response_model=list[DriverUsage7dItem])
+def get_alarm_fatigue_stats_7d(
+    current_user: User = Depends(require_roles("manager", "dispatcher")),
+    db: Session = Depends(get_db),
+) -> list[DriverUsage7dItem]:
+    """Return 7-day per-driver monitoring-off rate & false-alarm % matching `v_driver_usage_7d`."""
+    org_id = get_jwt_org_id(current_user)
+    cutoff_date = to_vn_time(datetime.now(timezone.utc)).date() - timedelta(days=6)
+
+    drivers = db.scalars(
+        select(User)
+        .where(User.organization_id == org_id, User.role == "driver")
+        .order_by(User.full_name.asc())
+    ).all()
+
+    usage_rows = db.scalars(
+        select(AppUsageDaily).where(
+            AppUsageDaily.organization_id == org_id,
+            AppUsageDaily.usage_date >= cutoff_date,
+        )
+    ).all()
+
+    agg: dict[str, list[int]] = {}
+    for r in usage_rows:
+        bucket = agg.setdefault(r.driver_id, [0, 0, 0, 0])
+        bucket[0] += int(r.monitored_minutes or 0)
+        bucket[1] += int(r.monitoring_off_count or 0)
+        bucket[2] += int(r.alerts_total or 0)
+        bucket[3] += int(r.alerts_false or 0)
+
+    items: list[DriverUsage7dItem] = []
+    for drv in drivers:
+        mon_min, off_cnt, al_tot, al_false = agg.get(drv.id, [0, 0, 0, 0])
+        hours = mon_min / 60.0
+        off_per_hour = round(off_cnt / hours, 2) if hours > 0 else 0.0
+        false_pct = round((100.0 * al_false) / al_tot, 1) if al_tot > 0 else 0.0
+        items.append(
+            DriverUsage7dItem(
+                driverId=drv.id,
+                fullName=drv.full_name,
+                monitoredMinutes=mon_min,
+                monitoringOffCount=off_cnt,
+                alertsTotal=al_tot,
+                alertsFalse=al_false,
+                offPerHour=off_per_hour,
+                falseAlertPct=false_pct,
+            )
+        )
+
+    items.sort(key=lambda x: (-x.falseAlertPct, -x.offPerHour, x.fullName))
+    return items

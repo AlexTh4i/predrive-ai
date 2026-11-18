@@ -32,6 +32,7 @@ from ..schemas.m3 import (
     BatchEventsResponse,
     CreateSessionRequest,
     CreateSessionResponse,
+    DriverFeedbackRequest,
     EndSessionRequest,
     HeartbeatRequest,
     HeartbeatResponse,
@@ -42,10 +43,15 @@ from ..schemas.m3 import (
     RestBreakItem,
     RestBreakStartRequest,
     SessionSchema,
+    SessionUsageReportRequest,
     SettingsSchema,
     UpsertEventRequest,
 )
-from ..services.events_service import _resolve_event_uuid, upsert_session_event
+from ..services.events_service import (
+    _resolve_event_uuid,
+    get_or_create_daily_usage,
+    upsert_session_event,
+)
 from ..services.mappers import (
     build_live_driver_state,
     ensure_utc,
@@ -676,6 +682,12 @@ def end_session(
         ev.status = "CLOSED"
         ev.closed_at = ended_utc
 
+    org_id = get_jwt_org_id(current_user)
+    usage = get_or_create_daily_usage(db, org_id, current_user.id, ended_utc)
+    if sess.total_driving_sec > 0:
+        usage.monitored_minutes += max(1, round(sess.total_driving_sec / 60))
+    usage.monitoring_off_count += max(0, int(payload.summary.monitoringOffCount))
+
     db.commit()
     db.refresh(sess)
 
@@ -687,4 +699,80 @@ def end_session(
     )
 
     return session_to_schema(sess)
+
+
+@router.post("/{id}/usage")
+def post_session_usage(
+    id: str,
+    payload: SessionUsageReportRequest,
+    current_user: User = Depends(require_roles("driver")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    _require_driver_consent(db, current_user)
+    sess = _get_owned_session(db, id, current_user)
+    org_id = get_jwt_org_id(current_user)
+    now = datetime.now(timezone.utc)
+    usage = get_or_create_daily_usage(db, org_id, current_user.id, now)
+    usage.monitored_minutes += int(payload.monitoredMinutesDelta)
+    usage.monitoring_off_count += int(payload.monitoringOffDelta)
+    db.commit()
+    return {
+        "sessionId": sess.id,
+        "usageDate": usage.usage_date.isoformat(),
+        "monitoredMinutes": usage.monitored_minutes,
+        "monitoringOffCount": usage.monitoring_off_count,
+        "alertsTotal": usage.alerts_total,
+        "alertsFalse": usage.alerts_false,
+    }
+
+
+@router.post("/{id}/events/{event_id}/feedback", response_model=AlertEvent)
+def post_session_event_feedback(
+    id: str,
+    event_id: str,
+    payload: DriverFeedbackRequest,
+    current_user: User = Depends(require_roles("driver")),
+    db: Session = Depends(get_db),
+) -> AlertEvent:
+    _require_driver_consent(db, current_user)
+    sess = _get_owned_session(db, id, current_user)
+    org_id = get_jwt_org_id(current_user)
+
+    resolved_id = _resolve_event_uuid(sess.id, event_id)
+    ev = db.get(EventModel, resolved_id) or db.scalar(
+        select(EventModel).where(
+            EventModel.session_id == sess.id,
+            EventModel.organization_id == org_id,
+            EventModel.client_event_id == event_id,
+        )
+    )
+    if ev is None or ev.organization_id != org_id or ev.driver_id != current_user.id:
+        raise AppError(
+            status.HTTP_404_NOT_FOUND,
+            "EVENT_NOT_FOUND",
+            "Không tìm thấy sự kiện cảnh báo trong phiên này",
+        )
+
+    old_fb = ev.driver_feedback
+    ev.driver_feedback = payload.feedback
+    usage = get_or_create_daily_usage(
+        db, org_id, current_user.id, ensure_utc(ev.occurred_at) or datetime.now(timezone.utc)
+    )
+    if old_fb != "false_alarm" and payload.feedback == "false_alarm":
+        usage.alerts_false += 1
+        if usage.alerts_total < usage.alerts_false:
+            usage.alerts_total = usage.alerts_false
+    elif old_fb == "false_alarm" and payload.feedback == "correct":
+        usage.alerts_false = max(0, usage.alerts_false - 1)
+
+    db.commit()
+    db.refresh(ev)
+
+    v_name = "Chưa phân xe"
+    v_id = ev.vehicle_id or sess.vehicle_id or current_user.vehicle_id
+    if v_id:
+        v_obj = db.get(Vehicle, v_id)
+        if v_obj:
+            v_name = v_obj.name
+    return event_to_schema(ev, current_user.full_name, v_name)
 

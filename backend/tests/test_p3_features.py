@@ -611,3 +611,117 @@ def test_p3_2_continuous_driving_rest_breaks_and_nearest_rest_stops_order(
         )
         assert hb_after_rest.status_code == 200
         assert hb_after_rest.json()["restReminder"] is None
+
+
+def test_p3_4_alarm_fatigue_driver_feedback_and_usage_7d(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    app = _setup_test_app(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        mgr = client.post(
+            "/api/v1/auth/login", json={"username": "manager", "password": "manager123"}
+        ).json()
+        mgr_token = mgr["accessToken"]
+
+        # Create a clean driver in Org 1 to verify exact math for offPerHour and falseAlertPct
+        created_drv = client.post(
+            "/api/v1/drivers",
+            json={
+                "fullName": "Phạm Kiểm Chứng Fatigue",
+                "phone": "0908889900",
+                "username": "driver_fatigue",
+                "password": "driver123!",
+            },
+            headers=_auth(mgr_token),
+        ).json()
+        drv_id = created_drv["id"]
+
+        drv_login = client.post(
+            "/api/v1/auth/login",
+            json={"username": "driver_fatigue", "password": "driver123!"},
+        ).json()
+        drv_token = drv_login["accessToken"]
+        client.post(
+            "/api/v1/auth/change-password",
+            json={"currentPassword": "driver123!", "newPassword": "newSafePassword123"},
+            headers=_auth(drv_token),
+        )
+        client.post(
+            "/api/v1/auth/consent",
+            json={"version": "2026-01", "locationConsent": False, "clipStorageConsent": False},
+            headers=_auth(drv_token),
+        )
+
+        now = datetime.now(timezone.utc)
+        sess_id = str(uuid4())
+        client.post(
+            "/api/v1/sessions",
+            json={"sessionId": sess_id, "startedAt": (now - timedelta(hours=2)).isoformat()},
+            headers=_auth(drv_token),
+        )
+
+        # Create 4 alerts in this session -> alerts_total = 4
+        ev_ids: list[str] = []
+        for idx in range(4):
+            eid = str(uuid4())
+            r = client.post(
+                f"/api/v1/sessions/{sess_id}/events",
+                json={
+                    "eventId": eid,
+                    "type": "DROWSINESS",
+                    "level": "WARNING",
+                    "status": "OPEN",
+                    "state": "DROWSINESS_SIGNS",
+                    "riskScore": 0.78,
+                    "startedAt": (now - timedelta(minutes=30 - idx)).isoformat(),
+                    "durationSec": 2,
+                    "capturedAt": (now - timedelta(minutes=30 - idx)).isoformat(),
+                },
+                headers=_auth(drv_token),
+            )
+            assert r.status_code == 200
+            ev_ids.append(r.json()["id"])
+
+        # Driver marks 1 alert as 'false_alarm' and 1 as 'correct'
+        fb1 = client.post(
+            f"/api/v1/sessions/{sess_id}/events/{ev_ids[0]}/feedback",
+            json={"feedback": "false_alarm"},
+            headers=_auth(drv_token),
+        )
+        assert fb1.status_code == 200
+        assert fb1.json()["driverFeedback"] == "false_alarm"
+
+        fb2 = client.post(
+            f"/api/v1/events/{ev_ids[1]}/feedback",
+            json={"feedback": "correct"},
+            headers=_auth(drv_token),
+        )
+        assert fb2.status_code == 200
+        assert fb2.json()["driverFeedback"] == "correct"
+
+        # End session: 120 minutes (7200s) monitored, 3 monitoring-off toggles -> offPerHour = 3 / 2.0 = 1.50, falseAlertPct = 1/4 = 25.0%
+        end_res = client.post(
+            f"/api/v1/sessions/{sess_id}/end",
+            json={
+                "endedAt": now.isoformat(),
+                "summary": {
+                    "totalDrivingSec": 7200,
+                    "warningCount": 4,
+                    "criticalCount": 0,
+                    "unavailableSec": 0,
+                    "monitoringOffCount": 3,
+                },
+            },
+            headers=_auth(drv_token),
+        )
+        assert end_res.status_code == 200
+
+        fatigue_res = client.get("/api/v1/stats/alarm-fatigue", headers=_auth(mgr_token))
+        assert fatigue_res.status_code == 200
+        row = next(x for x in fatigue_res.json() if x["driverId"] == drv_id)
+        assert row["monitoredMinutes"] == 120
+        assert row["monitoringOffCount"] == 3
+        assert row["alertsTotal"] == 4
+        assert row["alertsFalse"] == 1
+        assert row["offPerHour"] == pytest.approx(1.5)
+        assert row["falseAlertPct"] == pytest.approx(25.0)

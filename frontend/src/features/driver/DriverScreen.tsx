@@ -37,6 +37,8 @@ export function DriverScreen() {
     syncError,
     settings,
     restReminder,
+    lastAlertEvent,
+    submitEventFeedback,
     saveAndTestServer,
     login,
     pairVehicle,
@@ -346,6 +348,32 @@ export function DriverScreen() {
                 </div>
               )}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Nút phản hồi nhanh "Báo đúng / Báo sai" sau mỗi cảnh báo (P3-4) */}
+      {isMonitoring && lastAlertEvent && !isAlarm && (
+        <div
+          className="absolute inset-x-4 z-30 flex justify-center"
+          style={{ bottom: 'calc(max(1.25rem, env(safe-area-inset-bottom)) + 96px)' }}
+        >
+          <div className="inline-flex items-center gap-2 rounded-full bg-white/95 backdrop-blur px-3.5 py-1.5 text-xs grab-shadow">
+            <span className="font-medium text-[#1C1C1C]">Cảnh báo vừa rồi:</span>
+            <button
+              type="button"
+              onClick={() => void submitEventFeedback('correct')}
+              className="cursor-pointer rounded-full bg-[#E5F7ED] px-2.5 py-1 font-semibold text-[#00804A]"
+            >
+              ✓ Báo đúng
+            </button>
+            <button
+              type="button"
+              onClick={() => void submitEventFeedback('false_alarm')}
+              className="cursor-pointer rounded-full bg-[#FDECEA] px-2.5 py-1 font-semibold text-[#E5372B]"
+            >
+              ✕ Báo sai
+            </button>
           </div>
         </div>
       )}

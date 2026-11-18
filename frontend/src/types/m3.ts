@@ -196,8 +196,11 @@ export interface EndSessionRequest {
     warningCount: number;
     criticalCount: number;
     unavailableSec: number;
+    monitoringOffCount?: number;
   };
 }
+
+export type DriverFeedbackValue = 'correct' | 'false_alarm';
 
 export interface SessionSummaryResponse {
   id: string;

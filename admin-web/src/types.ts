@@ -224,3 +224,14 @@ export interface LocationTrailResponse {
   points: LocationTrailPoint[];
   alerts: LocationTrailAlertPin[];
 }
+
+export interface DriverUsage7d {
+  driverId: string;
+  fullName: string;
+  monitoredMinutes: number;
+  monitoringOffCount: number;
+  alertsTotal: number;
+  alertsFalse: number;
+  offPerHour: number;
+  falseAlertPct: number;
+}
