@@ -5,6 +5,7 @@ import type {
   BatchEventsResponse,
   ConsentStatusResponse,
   CreateSessionResponse,
+  DriverSettings,
   EndSessionRequest,
   HeartbeatRequest,
   HeartbeatResponse,
@@ -320,6 +321,14 @@ export const m3Api = {
       method: 'POST',
       token,
       body: { sessionId, startedAt },
+      serverUrl,
+    });
+  },
+
+  getConfig(token: string, serverUrl?: string): Promise<DriverSettings> {
+    return requestJson('/api/v1/sessions/config', {
+      method: 'GET',
+      token,
       serverUrl,
     });
   },

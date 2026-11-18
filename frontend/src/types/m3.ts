@@ -164,6 +164,7 @@ export interface HeartbeatResponse {
   status: string;
   state: ContractState;
   receivedAt: string;
+  settings?: DriverSettings;
 }
 
 export interface EndSessionRequest {

@@ -11,6 +11,7 @@ from ..models.models import (
     Consent,
     EventModel,
     LocationModel,
+    OrgSettings,
     SessionModel,
     User,
     Vehicle,
@@ -47,6 +48,24 @@ def _resolve_event_uuid(session_id: str, raw_event_id: str) -> str:
         return str(UUID(str(raw_event_id)))
     except ValueError:
         return str(uuid5(NAMESPACE_DNS, f"{session_id}:{raw_event_id}"))
+
+
+def classify_alert_level_from_settings(duration_sec: float, org_settings: OrgSettings) -> int:
+    if duration_sec >= float(org_settings.level3_sec):
+        return 3
+    if duration_sec >= float(org_settings.level2_sec):
+        return 2
+    if duration_sec >= float(org_settings.level1_sec):
+        return 1
+    return 0
+
+
+def alert_action_for_level(level: int) -> str:
+    if level >= 3:
+        return "notify_dispatcher"
+    if level == 2:
+        return "cabin_bell"
+    return "gentle_reminder"
 
 
 def _resolve_incoming_level(payload: UpsertEventRequest) -> int:
@@ -160,9 +179,12 @@ def _merge_existing_event(
     if incoming_lvl_int > old_lvl_int:
         existing.level = incoming_lvl_int
         metrics["api_level"] = "CRITICAL" if incoming_lvl_int >= 3 else payload.level
+        metrics["alert_action"] = alert_action_for_level(incoming_lvl_int)
         if old_lvl_int < 3 and incoming_lvl_int >= 3:
             session_obj.warning_count = max(0, session_obj.warning_count - 1)
             session_obj.critical_count += 1
+    elif "alert_action" not in metrics:
+        metrics["alert_action"] = alert_action_for_level(existing.level)
 
     if STATUS_RANK.get(payload.status, 1) > STATUS_RANK.get(existing.status, 1):
         existing.status = payload.status
@@ -259,6 +281,7 @@ def upsert_session_event(
                     created_at=now,
                     metrics={
                         "api_level": "CRITICAL" if lvl_int >= 3 else payload.level,
+                        "alert_action": alert_action_for_level(lvl_int),
                         "state": payload.state,
                         "risk_score": payload.riskScore,
                         "duration_sec": payload.durationSec,
@@ -326,8 +349,11 @@ def upsert_session_event(
             "driver_state",
             live_state.model_dump(mode="json"),
         )
-        # Rule: delayed events only go into history, NEVER emit SSE `alert`
-        if not incoming_delayed and not ev.delayed:
+        # Rule: delayed events only go into history, NEVER emit SSE `alert`.
+        # Multi-level rule (P3-3): when explicit severityLevel < 3 (Level 1 gentle reminder / Level 2 cabin bell),
+        # only Level 3 notifies dispatchers via SSE `alert`! Legacy clients (severityLevel is None) keep M3 behavior.
+        should_notify_dispatcher = payload.severityLevel is None or ev.level >= 3
+        if not incoming_delayed and not ev.delayed and should_notify_dispatcher:
             sse_broker.publish(
                 driver.organization_id,
                 "alert",

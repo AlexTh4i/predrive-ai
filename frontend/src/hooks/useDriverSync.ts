@@ -41,6 +41,7 @@ interface ActiveEpisode {
   startedAt: string;
   startMs: number;
   level: EventLevel;
+  severityLevel: 1 | 2 | 3;
   state: ContractState;
   riskScore: number | null;
 }
@@ -473,7 +474,7 @@ export function useDriverSync() {
     }
 
     try {
-      await m3Api.postHeartbeat(
+      const hbRes = await m3Api.postHeartbeat(
         currentAuth.accessToken,
         sess.sessionId,
         {
@@ -486,6 +487,10 @@ export function useDriverSync() {
         },
         url,
       );
+      if (hbRes.settings && sessionRef.current?.sessionId === sess.sessionId) {
+        sess.settings = hbRes.settings;
+        setSettings(hbRes.settings);
+      }
       if (loadOfflineQueue().length > 0) {
         void flushNow();
       } else {
@@ -542,6 +547,7 @@ export function useDriverSync() {
         eventId: episode.eventId,
         type: 'DROWSINESS',
         level: episode.level,
+        severityLevel: episode.severityLevel,
         status: 'CLOSED',
         state: episode.state,
         riskScore: episode.riskScore,
@@ -721,6 +727,8 @@ export function useDriverSync() {
           closeEpisode(sess, sess.distractedEpisode, nowMs);
           sess.distractedEpisode = null;
         }
+        const sev: 1 | 2 = result?.severityLevel === 2 ? 2 : 1;
+        const risk = sev === 2 ? 0.8 : 0.55;
         if (!sess.drowsyEpisode) {
           const eventId = generateUuid();
           sess.warningCount += 1;
@@ -729,18 +737,36 @@ export function useDriverSync() {
             startedAt: nowIso,
             startMs: nowMs,
             level: 'WARNING',
+            severityLevel: sev,
             state: 'DROWSINESS_SIGNS',
-            riskScore: 0.8,
+            riskScore: risk,
           };
           queueAndFlushEvent(sess, {
             eventId,
             type: 'DROWSINESS',
             level: 'WARNING',
+            severityLevel: sev,
             status: 'OPEN',
             state: 'DROWSINESS_SIGNS',
-            riskScore: 0.8,
+            riskScore: risk,
             startedAt: nowIso,
-            durationSec: 1,
+            durationSec: sev,
+            capturedAt: nowIso,
+          });
+        } else if (sev > sess.drowsyEpisode.severityLevel) {
+          sess.drowsyEpisode.severityLevel = sev;
+          sess.drowsyEpisode.riskScore = risk;
+          const durationSec = Math.max(sev, Math.round((nowMs - sess.drowsyEpisode.startMs) / 1000));
+          queueAndFlushEvent(sess, {
+            eventId: sess.drowsyEpisode.eventId,
+            type: 'DROWSINESS',
+            level: 'WARNING',
+            severityLevel: sev,
+            status: 'OPEN',
+            state: 'DROWSINESS_SIGNS',
+            riskScore: risk,
+            startedAt: sess.drowsyEpisode.startedAt,
+            durationSec,
             capturedAt: nowIso,
           });
         }
@@ -750,10 +776,11 @@ export function useDriverSync() {
           sess.distractedEpisode = null;
         }
         if (sess.drowsyEpisode) {
-          if (sess.drowsyEpisode.level !== 'CRITICAL') {
+          if (sess.drowsyEpisode.level !== 'CRITICAL' || sess.drowsyEpisode.severityLevel < 3) {
             sess.warningCount = Math.max(0, sess.warningCount - 1);
             sess.criticalCount += 1;
             sess.drowsyEpisode.level = 'CRITICAL';
+            sess.drowsyEpisode.severityLevel = 3;
             sess.drowsyEpisode.state = 'CRITICAL';
             sess.drowsyEpisode.riskScore = 0.95;
             const durationSec = Math.max(2, Math.round((nowMs - sess.drowsyEpisode.startMs) / 1000));
@@ -761,6 +788,7 @@ export function useDriverSync() {
               eventId: sess.drowsyEpisode.eventId,
               type: 'DROWSINESS',
               level: 'CRITICAL',
+              severityLevel: 3,
               status: 'ESCALATED',
               state: 'CRITICAL',
               riskScore: 0.95,
@@ -777,6 +805,7 @@ export function useDriverSync() {
             startedAt: nowIso,
             startMs: nowMs,
             level: 'CRITICAL',
+            severityLevel: 3,
             state: 'CRITICAL',
             riskScore: 0.95,
           };
@@ -784,11 +813,12 @@ export function useDriverSync() {
             eventId,
             type: 'DROWSINESS',
             level: 'CRITICAL',
+            severityLevel: 3,
             status: 'ESCALATED',
             state: 'CRITICAL',
             riskScore: 0.95,
             startedAt: nowIso,
-            durationSec: 2,
+            durationSec: 4,
             capturedAt: nowIso,
           });
         }
@@ -797,6 +827,7 @@ export function useDriverSync() {
           closeEpisode(sess, sess.drowsyEpisode, nowMs);
           sess.drowsyEpisode = null;
         }
+        const distSev: 1 | 2 = result?.severityLevel === 2 ? 2 : 1;
         if (!sess.distractedEpisode) {
           const eventId = generateUuid();
           sess.warningCount += 1;
@@ -805,6 +836,7 @@ export function useDriverSync() {
             startedAt: nowIso,
             startMs: nowMs,
             level: 'WARNING',
+            severityLevel: distSev,
             state: 'DISTRACTED',
             riskScore: 0.65,
           };
@@ -812,6 +844,7 @@ export function useDriverSync() {
             eventId,
             type: 'DROWSINESS',
             level: 'WARNING',
+            severityLevel: distSev,
             status: 'OPEN',
             state: 'DISTRACTED',
             riskScore: 0.65,
