@@ -70,6 +70,21 @@ def settings_to_schema(settings: OrgSettings) -> SettingsSchema:
         restResetMin=settings.min_rest_min,
         shareLocation=settings.share_location,
         heartbeatIntervalSec=settings.heartbeat_interval_sec,
+        earThreshold=round(float(settings.ear_threshold), 4),
+        eyeClosedSec=round(float(settings.eye_closed_sec), 2),
+        headPoseSec=round(float(settings.head_pose_sec), 2),
+        tooDarkThreshold=round(float(settings.too_dark_threshold), 2),
+        level1Sec=round(float(settings.level1_sec), 2),
+        level2Sec=round(float(settings.level2_sec), 2),
+        level3Sec=round(float(settings.level3_sec), 2),
+        ackTimeoutSec=settings.ack_timeout_sec,
+        maxContinuousDriveMin=settings.max_continuous_drive_min,
+        restReminderBeforeMin=settings.rest_reminder_before_min,
+        locationIntervalSec=settings.location_interval_sec,
+        heartbeatRetentionDays=settings.heartbeat_retention_days,
+        locationRetentionDays=settings.location_retention_days,
+        eventRetentionDays=settings.event_retention_days,
+        auditRetentionDays=settings.audit_retention_days,
     )
 
 

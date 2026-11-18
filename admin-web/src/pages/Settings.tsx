@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { FormEvent } from 'react';
-import { AlertCircle, Check, Clock3, Info, LoaderCircle, MapPin, Save, Settings2 } from 'lucide-react';
+import { AlertCircle, Archive, Check, Clock3, Info, LoaderCircle, MapPin, Save, Settings2 } from 'lucide-react';
 import { api } from '../api';
 import { ErrorState, Loading, PageHeading, SectionHeading } from '../components/ui';
 import { useFeed } from '../hooks/useLiveFeed';
@@ -15,6 +15,10 @@ function fields(settings: SettingsData) {
     critical: String(settings.continuousCriticalSec / 60),
     rest: String(settings.restResetMin),
     shareLocation: settings.shareLocation,
+    hbRetention: String(settings.heartbeatRetentionDays ?? 30),
+    locRetention: String(settings.locationRetentionDays ?? 90),
+    evRetention: String(settings.eventRetentionDays ?? 365),
+    auditRetention: String(settings.auditRetentionDays ?? 730),
   };
 }
 
@@ -26,7 +30,8 @@ function SettingsForm({ initial }: { initial: SettingsData }) {
   const [error, setError] = useState('');
   const [validation, setValidation] = useState<{ field: 'warning' | 'critical' | 'rest'; message: string }>();
   const [success, setSuccess] = useState(false);
-  const dirty = JSON.stringify(fields(saved)) !== JSON.stringify(draft);
+  const baseSaved = fields(saved);
+  const dirty = JSON.stringify(baseSaved) !== JSON.stringify(draft);
 
   function update<K extends keyof typeof draft>(key: K, value: typeof draft[K]) {
     setDraft((current) => ({ ...current, [key]: value }));
@@ -41,6 +46,11 @@ function SettingsForm({ initial }: { initial: SettingsData }) {
     const warning = Math.round(Number(draft.warning) * 60);
     const critical = Math.round(Number(draft.critical) * 60);
     const rest = Number(draft.rest);
+    const hbRet = Math.max(1, Math.round(Number(draft.hbRetention) || 30));
+    const locRet = Math.max(1, Math.round(Number(draft.locRetention) || 90));
+    const evRet = Math.max(1, Math.round(Number(draft.evRetention) || 365));
+    const auditRet = Math.max(1, Math.round(Number(draft.auditRetention) || 730));
+
     const issue = [
       { field: 'warning', message: 'Nhập ngưỡng cảnh báo dương có thể quy đổi sang giây.', invalid: !Number.isSafeInteger(warning) || warning < 1 },
       { field: 'critical', message: 'Nhập ngưỡng nguy hiểm dương có thể quy đổi sang giây.', invalid: !Number.isSafeInteger(critical) || critical < 1 },
@@ -57,16 +67,38 @@ function SettingsForm({ initial }: { initial: SettingsData }) {
     setValidation(undefined);
     setSuccess(false);
     setSaving(true);
+
+    const retentionModified =
+      draft.hbRetention !== baseSaved.hbRetention ||
+      draft.locRetention !== baseSaved.locRetention ||
+      draft.evRetention !== baseSaved.evRetention ||
+      draft.auditRetention !== baseSaved.auditRetention;
+    const includeRetention = saved.heartbeatRetentionDays !== undefined || retentionModified;
+
+    const payload: SettingsData = {
+      ...saved,
+      continuousWarnSec: warning,
+      continuousCriticalSec: critical,
+      restResetMin: rest,
+      shareLocation: draft.shareLocation,
+      ...(includeRetention
+        ? {
+            heartbeatRetentionDays: hbRet,
+            locationRetentionDays: locRet,
+            eventRetentionDays: evRet,
+            auditRetentionDays: auditRet,
+          }
+        : {}),
+    };
+
     try {
-      const updated = await api.updateSettings({
-        ...saved, continuousWarnSec: warning, continuousCriticalSec: critical, restResetMin: rest, shareLocation: draft.shareLocation,
-      });
+      const updated = await api.updateSettings(payload);
       setSaved(updated);
       setDraft(fields(updated));
       applySettings(updated);
       setSuccess(true);
-    } catch (error) {
-      setError(errorMessage(error));
+    } catch (err) {
+      setError(errorMessage(err));
     } finally {
       setSaving(false);
     }
@@ -104,6 +136,24 @@ function SettingsForm({ initial }: { initial: SettingsData }) {
             aria-label="Cho phép chia sẻ vị trí" onChange={(event) => update('shareLocation', event.target.checked)} />
         </label>
       </fieldset>
+      <fieldset disabled={saving} className="card panel settings-panel" aria-label="Thời hạn lưu trữ dữ liệu">
+        <SectionHeading title="Thời hạn lưu trữ dữ liệu (Retention)" description="Số ngày giữ dữ liệu trước khi tác vụ dọn dẹp hằng ngày tự động xóa."
+          actions={<span className="icon-tile tone-amber"><Archive size={19} aria-hidden /></span>} />
+        <div className="settings-fields">
+          <div><label htmlFor="ret-heartbeat">Heartbeat (ngày)</label>
+            <input id="ret-heartbeat" type="number" min={1} max={3650} step={1} required value={draft.hbRetention}
+              onChange={(event) => update('hbRetention', event.target.value)} /></div>
+          <div><label htmlFor="ret-location">Vị trí GPS (ngày)</label>
+            <input id="ret-location" type="number" min={1} max={3650} step={1} required value={draft.locRetention}
+              onChange={(event) => update('locRetention', event.target.value)} /></div>
+          <div><label htmlFor="ret-event">Sự kiện đã đóng (ngày)</label>
+            <input id="ret-event" type="number" min={1} max={3650} step={1} required value={draft.evRetention}
+              onChange={(event) => update('evRetention', event.target.value)} /></div>
+          <div><label htmlFor="ret-audit">Nhật ký Audit (ngày)</label>
+            <input id="ret-audit" type="number" min={1} max={3650} step={1} required value={draft.auditRetention}
+              onChange={(event) => update('auditRetention', event.target.value)} /></div>
+        </div>
+      </fieldset>
       {error && <div className="card"><ErrorState message={`Chưa lưu được cài đặt. ${error}`} /></div>}
       <div className="card settings-save">
         <p role="status" className={`settings-status ${dirty ? 'settings-dirty' : ''}`}>
@@ -125,7 +175,7 @@ export function Settings() {
   const result = useResource(loadSettings);
   return (
     <>
-      <PageHeading title="Cài đặt hệ thống" description="Quản lý ngưỡng lái xe, thời gian nghỉ và quyền chia sẻ vị trí."
+      <PageHeading title="Cài đặt hệ thống" description="Quản lý ngưỡng lái xe, thời gian nghỉ, vị trí và chính sách lưu trữ dữ liệu."
         eyebrow={<><Settings2 size={14} aria-hidden /> QUẢN LÝ ĐỘI XE</>} />
       {result.loading && <div className="card"><Loading /></div>}
       {result.error && <div className="card"><ErrorState message={result.error} retry={result.retry} /></div>}

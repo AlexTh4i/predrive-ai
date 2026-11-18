@@ -134,6 +134,22 @@ class SettingsSchema(CamelModel):
     restResetMin: int = Field(default=15, ge=1)
     shareLocation: bool = False
     heartbeatIntervalSec: int = Field(default=30, ge=5)
+    # Extended dynamic thresholds & retention policies per organization (R3 / P2-6 / Phase 3)
+    earThreshold: Optional[float] = Field(default=None, ge=0.05, le=0.6)
+    eyeClosedSec: Optional[float] = Field(default=None, ge=0.2, le=30.0)
+    headPoseSec: Optional[float] = Field(default=None, ge=0.2, le=30.0)
+    tooDarkThreshold: Optional[float] = Field(default=None, ge=1.0, le=150.0)
+    level1Sec: Optional[float] = Field(default=None, ge=0.2, le=30.0)
+    level2Sec: Optional[float] = Field(default=None, ge=0.5, le=60.0)
+    level3Sec: Optional[float] = Field(default=None, ge=1.0, le=120.0)
+    ackTimeoutSec: Optional[int] = Field(default=None, ge=5, le=3600)
+    maxContinuousDriveMin: Optional[int] = Field(default=None, ge=1, le=1440)
+    restReminderBeforeMin: Optional[int] = Field(default=None, ge=1, le=180)
+    locationIntervalSec: Optional[int] = Field(default=None, ge=5, le=600)
+    heartbeatRetentionDays: Optional[int] = Field(default=None, ge=1, le=3650)
+    locationRetentionDays: Optional[int] = Field(default=None, ge=1, le=3650)
+    eventRetentionDays: Optional[int] = Field(default=None, ge=1, le=3650)
+    auditRetentionDays: Optional[int] = Field(default=None, ge=1, le=3650)
 
 
 # --- DRIVER APP ---

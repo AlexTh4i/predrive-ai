@@ -204,4 +204,173 @@ def test_p2_5_backup_script_and_restore_drill_on_postgres15(tmp_path: Path):
         admin_eng.dispose()
 
 
+def test_p2_6_retention_settings_and_purge_deletes_expired_keeps_fresh_and_logs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    from datetime import datetime, timedelta, timezone
+    import logging
+    from uuid import uuid4
+    from fastapi.testclient import TestClient
+    from sqlalchemy import select
+
+    from app.core import database as db_mod
+    from app.main import app
+    from app.models.models import AuditLog, EventModel, HeartbeatModel, LocationModel
+    from app.services.seed import ORG_ID, det_uuid
+    from app.services.watchdog import purge_expired_organization_data
+
+    db_url = f"sqlite:///{(tmp_path / 'p2_ret.db').as_posix()}"
+    monkeypatch.setenv("DATABASE_URL", db_url)
+    monkeypatch.setenv("PREDRIVE_ENABLE_WATCHDOG", "0")
+    db_mod.reset_engine(db_url)
+    db_mod.Base.metadata.create_all(bind=db_mod.engine)
+
+    with TestClient(app) as client:
+        mgr = client.post(
+            "/api/v1/auth/login", json={"username": "manager", "password": "manager123"}
+        ).json()
+        mgr_hdr = {"Authorization": f"Bearer {mgr['accessToken']}"}
+
+        # Manager updates retention policy via PUT /api/v1/settings
+        upd = client.put(
+            "/api/v1/settings",
+            json={
+                "continuousWarnSec": 7200,
+                "continuousCriticalSec": 10800,
+                "restResetMin": 15,
+                "shareLocation": True,
+                "heartbeatIntervalSec": 30,
+                "heartbeatRetentionDays": 5,
+                "locationRetentionDays": 10,
+                "eventRetentionDays": 15,
+                "auditRetentionDays": 20,
+            },
+            headers=mgr_hdr,
+        )
+        assert upd.status_code == 200
+        assert upd.json()["heartbeatRetentionDays"] == 5
+        assert upd.json()["eventRetentionDays"] == 15
+
+        now = datetime.now(timezone.utc)
+        drv_id = det_uuid("drv-1")
+        sess_id = str(uuid4())
+        open_ev_old_id = str(uuid4())
+        closed_ev_old_id = str(uuid4())
+        closed_ev_fresh_id = str(uuid4())
+
+        with db_mod.SessionLocal() as db:
+            from app.models.models import SessionModel
+
+            db.add(
+                SessionModel(
+                    id=sess_id,
+                    organization_id=ORG_ID,
+                    driver_id=drv_id,
+                    status="active",
+                    started_at=now - timedelta(days=40),
+                    current_state="NORMAL",
+                )
+            )
+            db.flush()
+            # 1 old CLOSED event (40d > 15d -> MUST be deleted)
+            db.add(
+                EventModel(
+                    id=closed_ev_old_id,
+                    organization_id=ORG_ID,
+                    session_id=sess_id,
+                    driver_id=drv_id,
+                    client_event_id=closed_ev_old_id,
+                    type="DROWSINESS",
+                    level="WARNING",
+                    status="CLOSED",
+                    occurred_at=now - timedelta(days=40),
+                    created_at=now - timedelta(days=40),
+                )
+            )
+            # 1 old OPEN event (40d > 15d, but OPEN -> MUST be preserved!)
+            db.add(
+                EventModel(
+                    id=open_ev_old_id,
+                    organization_id=ORG_ID,
+                    session_id=sess_id,
+                    driver_id=drv_id,
+                    client_event_id=open_ev_old_id,
+                    type="DROWSINESS",
+                    level="CRITICAL",
+                    status="OPEN",
+                    occurred_at=now - timedelta(days=40),
+                    created_at=now - timedelta(days=40),
+                )
+            )
+            # 1 fresh CLOSED event (2d < 15d -> MUST be preserved!)
+            db.add(
+                EventModel(
+                    id=closed_ev_fresh_id,
+                    organization_id=ORG_ID,
+                    session_id=sess_id,
+                    driver_id=drv_id,
+                    client_event_id=closed_ev_fresh_id,
+                    type="DROWSINESS",
+                    level="WARNING",
+                    status="CLOSED",
+                    occurred_at=now - timedelta(days=2),
+                    created_at=now - timedelta(days=2),
+                )
+            )
+            # 1 old heartbeat (8d > 5d) + 1 fresh heartbeat (1d < 5d)
+            old_hb = HeartbeatModel(
+                organization_id=ORG_ID,
+                session_id=sess_id,
+                driver_id=drv_id,
+                state="NORMAL",
+                ts=now - timedelta(days=8),
+            )
+            fresh_hb = HeartbeatModel(
+                organization_id=ORG_ID,
+                session_id=sess_id,
+                driver_id=drv_id,
+                state="NORMAL",
+                ts=now - timedelta(days=1),
+            )
+            old_loc = LocationModel(
+                organization_id=ORG_ID,
+                session_id=sess_id,
+                driver_id=drv_id,
+                lat=10.7,
+                lng=106.6,
+                ts=now - timedelta(days=12),
+            )
+            old_aud = AuditLog(
+                organization_id=ORG_ID,
+                actor_id=mgr["user"]["id"],
+                action="old_action",
+                created_at=now - timedelta(days=25),
+            )
+            db.add_all([old_hb, fresh_hb, old_loc, old_aud])
+            db.commit()
+            fresh_hb_id = fresh_hb.id
+            old_hb_id = old_hb.id
+
+            with caplog.at_level(logging.INFO, logger="predrive.watchdog"):
+                counts = purge_expired_organization_data(db, now_utc=now)
+
+            assert counts["heartbeats"] >= 1
+            assert counts["locations"] >= 1
+            assert counts["events"] >= 1
+            assert counts["audit_logs"] >= 1
+            assert any("Retention purge completed" in rec.message for rec in caplog.records)
+
+            # Old rows deleted, fresh rows & OPEN event preserved!
+            assert db.get(EventModel, closed_ev_old_id) is None
+            assert db.get(EventModel, open_ev_old_id) is not None
+            assert db.get(EventModel, closed_ev_fresh_id) is not None
+            assert db.get(HeartbeatModel, old_hb_id) is None
+            assert db.get(HeartbeatModel, fresh_hb_id) is not None
+            assert (
+                db.scalar(select(AuditLog).where(AuditLog.action == "old_action"))
+                is None
+            )
+
+
+
 

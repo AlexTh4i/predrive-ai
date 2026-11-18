@@ -639,6 +639,39 @@ def update_settings(
     org_settings.rest_reset_min = payload.restResetMin
     org_settings.share_location = payload.shareLocation
     org_settings.heartbeat_interval_sec = payload.heartbeatIntervalSec
+
+    optional_map = {
+        "earThreshold": "ear_threshold",
+        "eyeClosedSec": "eye_closed_sec",
+        "headPoseSec": "head_pose_sec",
+        "tooDarkThreshold": "too_dark_threshold",
+        "level1Sec": "level1_sec",
+        "level2Sec": "level2_sec",
+        "level3Sec": "level3_sec",
+        "ackTimeoutSec": "ack_timeout_sec",
+        "maxContinuousDriveMin": "max_continuous_drive_min",
+        "restReminderBeforeMin": "rest_reminder_before_min",
+        "locationIntervalSec": "location_interval_sec",
+        "heartbeatRetentionDays": "heartbeat_retention_days",
+        "locationRetentionDays": "location_retention_days",
+        "eventRetentionDays": "event_retention_days",
+        "auditRetentionDays": "audit_retention_days",
+    }
+    for schema_field, model_attr in optional_map.items():
+        val = getattr(payload, schema_field, None)
+        if val is not None:
+            setattr(org_settings, model_attr, val)
+
+    if (
+        org_settings.level1_sec > org_settings.level2_sec
+        or org_settings.level2_sec > org_settings.level3_sec
+    ):
+        raise AppError(
+            status.HTTP_400_BAD_REQUEST,
+            "INVALID_SETTINGS",
+            "level1Sec <= level2Sec <= level3Sec là bắt buộc",
+        )
+
     org_settings.updated_at = datetime.now(timezone.utc)
     record_audit_log(
         db,
@@ -648,7 +681,7 @@ def update_settings(
         entity="settings",
         entity_id=current_user.organization_id,
         request=request,
-        meta=payload.model_dump(mode="json"),
+        meta=payload.model_dump(mode="json", exclude_none=True),
     )
     db.commit()
     db.refresh(org_settings)

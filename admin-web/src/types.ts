@@ -90,6 +90,17 @@ export interface Settings {
   restResetMin: number;
   shareLocation: boolean;
   heartbeatIntervalSec: number;
+  level1Sec?: number;
+  level2Sec?: number;
+  level3Sec?: number;
+  ackTimeoutSec?: number;
+  maxContinuousDriveMin?: number;
+  restReminderBeforeMin?: number;
+  locationIntervalSec?: number;
+  heartbeatRetentionDays?: number;
+  locationRetentionDays?: number;
+  eventRetentionDays?: number;
+  auditRetentionDays?: number;
 }
 
 export interface DateRange {
