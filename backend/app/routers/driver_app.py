@@ -42,6 +42,7 @@ from ..services.mappers import (
     session_to_schema,
     settings_to_schema,
 )
+from ..services.observability import HEARTBEATS_RECEIVED_TOTAL
 from ..services.sse import sse_broker
 from ..services.rate_limiter import enforce_events_rate_limit, enforce_heartbeat_rate_limit
 
@@ -290,6 +291,7 @@ def post_session_heartbeat(
         lng=payload.location.lng if (allow_loc and payload.location) else None,
     )
     db.add(hb)
+    HEARTBEATS_RECEIVED_TOTAL.inc()
 
     # Auto-recover if session was DISCONNECTED
     if sess.current_state == "DISCONNECTED" or sess.status == "disconnected":

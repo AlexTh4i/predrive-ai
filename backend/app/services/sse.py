@@ -1,7 +1,10 @@
 import asyncio
 import json
 from collections import defaultdict
+import time
 from typing import Any
+
+from .observability import observe_sse_publish
 
 
 class SSEBroker:
@@ -22,6 +25,7 @@ class SSEBroker:
             subs.remove(queue)
 
     def publish(self, org_id: str, event_name: str, payload: dict[str, Any]) -> None:
+        t0 = time.perf_counter()
         msg = {
             "event": event_name,
             "data": json.dumps(payload, ensure_ascii=False),
@@ -42,6 +46,8 @@ class SSEBroker:
                     q.put_nowait(msg)
                 except Exception:
                     pass
+        total_subs = sum(len(s) for s in self._subscribers.values())
+        observe_sse_publish(time.perf_counter() - t0, total_subs)
 
     def get_recent_messages(self, org_id: str) -> list[dict[str, str]]:
         return list(self._history.get(org_id, ()))
