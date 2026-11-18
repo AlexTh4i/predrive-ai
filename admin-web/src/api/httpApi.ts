@@ -32,7 +32,11 @@ async function fetchApi(path: string, init: RequestInit) {
     403: 'Tài khoản không có quyền thực hiện thao tác này.',
     404: 'Máy chủ không tìm thấy dữ liệu hoặc chưa hỗ trợ chức năng này.',
   };
-  throw new ApiError(fallbacks[response.status] ?? `Máy chủ trả về lỗi (${response.status}).`, response.status, body?.error?.code);
+  throw new ApiError(
+    fallbacks[response.status] ?? body?.error?.message ?? `Máy chủ trả về lỗi (${response.status}).`,
+    response.status,
+    body?.error?.code,
+  );
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -99,6 +103,8 @@ export const httpApi: AdminApi = {
     method: 'POST', body: JSON.stringify({ note }),
   }),
   getDrivers: (signal) => request('/drivers', { signal }),
+  createDriver: (payload) => request('/drivers', { method: 'POST', body: JSON.stringify(payload) }),
+  createPairingCode: (payload = {}) => request('/pairing-codes', { method: 'POST', body: JSON.stringify(payload) }),
   getDriver: (id, signal) => request(`/drivers/${encodeURIComponent(id)}`, { signal }),
   getDriverStats: (id, range, signal) => request(`/drivers/${encodeURIComponent(id)}/stats${queryString(range)}`, { signal }),
   getHourly: (range, signal) => request(`/stats/hourly${queryString(range)}`, { signal }),

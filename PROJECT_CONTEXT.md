@@ -1,10 +1,10 @@
 # PREDRIVE AI — PROJECT CONTEXT (TỔNG QUAN & TRẠNG THÁI HỆ THỐNG CẬP NHẬT)
 
-> **Phiên bản:** 2.2 (Mobile App Android `.apk` + On-Device AI + Grab Minimal UI) | **Ngày cập nhật:** 08/11/2026  
-> **Mới (v2.2):** **Đã hoàn thành Milestone M2.5** — triển khai giao diện phong cách Grab (`#00B14F`, font `Be Vietnam Pro`), linh vật **Vẹt xanh vẽ tay SVG (`ParrotMascot.tsx`)**, chuông báo kim loại (`useBellAlarm.ts`), **AI chạy trực tiếp trên thiết bị (`driverAnalyzer.ts` - MediaPipe WASM)** và đóng gói thành công file cài đặt Android **[`PreDrive-debug.apk`](file:///D:/CDIO4/PreDrive-debug.apk)** qua Capacitor — xem **Mục 9**.  
-> **Trạng thái hiện tại:** Đã hoàn thành M1 (PWA ↔ FastAPI WebSocket), M2 (AI Baseline Python) và **M2.5 (Android Mobile App + On-Device AI độc lập không cần mạng LAN)**.
+> **Phiên bản:** 3.0 (M3 Fullstack: Mobile App Android `.apk` ↔ FastAPI + SQLite/PostgreSQL ↔ Web Admin Điều hành) | **Ngày cập nhật:** 16/11/2026  
+> **Mới (v3.0):** **Đã hoàn thành nối thông Giai đoạn 1 → 3** — Hợp nhất toàn bộ **Backend M3 (`backend/`)** với DB SQLite WAL/PostgreSQL + JWT Auth + SSE + Watchdog, **Web Admin (`admin-web/`)** giao diện điều hành đội xe + Gọi/Zalo + Web Notification + Tạo tài xế & Mã ghép xe, và **App Tài xế (`frontend/` + `PreDrive-debug.apk`)** tích hợp On-Device AI (`@mediapipe/tasks-vision`) + Đăng nhập/Ghép xe + Heartbeat/Events + Hàng đợi Offline tự đồng bộ bù.  
+> **Trạng thái hiện tại:** Đã hoàn thành M1, M2, M2.5, M3 và Web Admin điều hành đội xe (Phương án A: Web Notification + Gọi/Nhắn Zalo).  
 >
-> **Nguồn thông tin chung cho cả ba thành viên và AI Coding Assistants (Codex / Antigravity).** Đọc file này trước, sau đó đọc `AI_CONTEXT.md`, `FRONTEND_CONTEXT.md`, `BACKEND_CONTEXT.md` và `docs/api-contract.md`.
+> **Nguồn thông tin chung cho cả ba thành viên và AI Coding Assistants (Codex / Antigravity).** Đọc file này trước, sau đó đọc `AI_CONTEXT.md`, `FRONTEND_CONTEXT.md`, `BACKEND_CONTEXT.md`, `PLAN_CONTEXT.md` và `docs/api-contract.md`.
 
 ---
 
@@ -37,48 +37,68 @@ d:\CDIO4\
 │   │   └── test_analyzer.py        # 4/4 Unit tests PASS (ảnh rỗng, ảnh tối, nhiễu, timing)
 │   └── README.md                   # Tài liệu kỹ thuật module AI
 │
-├── backend/                        # [TV3 - Gia Huy] FastAPI WebSocket Gateway
+├── backend/                        # [TV3 - Gia Huy] FastAPI Backend M3 + Legacy WS Gateway
 │   ├── app/
-│   │   ├── __init__.py
-│   │   ├── main.py                 # REST (/health, /api/v1/sessions) + WS (/ws/monitor) + AI Hook
-│   │   └── schemas.py              # FrameMessage, SessionResponse, AnalysisResult (Full Enums)
+│   │   ├── core/                   # config.py, database.py (SQLite WAL/PostgreSQL), errors.py, security.py (JWT/Argon2)
+│   │   ├── models/                 # SQLAlchemy ORM (Organization, User, Vehicle, Pairing, Session, Event, Heartbeat, Location, OrgSettings)
+│   │   ├── routers/                # auth.py, driver_app.py, web_admin.py
+│   │   ├── schemas/                # m3.py (Contract v0.3 camelCase), legacy.py (M1/M2 WS)
+│   │   ├── services/               # events_service.py, mappers.py, seed.py, sse.py, watchdog.py
+│   │   └── main.py                 # FastAPI app (M3 REST/SSE + Legacy WS; hỗ trợ chế độ M3-only khi thiếu ai/)
+│   ├── migrations/                 # Alembic migrations (`0001_initial_m3_schema.py`)
 │   ├── tests/
-│   │   └── test_gateway.py         # 8/8 Unit tests PASS (session, WS, rate-limit, AI response)
+│   │   ├── test_gateway.py         # 8/8 Unit tests PASS (legacy WS M1/M2)
+│   │   └── test_m3_backend.py      # 6/6 Integration tests PASS (Seed, RBAC, Offline/Delayed, SSE, Watchdog)
 │   ├── requirements.txt
 │   └── README.md
 │
-├── frontend/                       # [TV2 - Kenneth] React 19 + TS + Vite + Tailwind + Capacitor Android
-│   ├── android/                    # Native Android project (Capacitor 8, MainActivity.java cấp quyền Camera)
+├── admin-web/                      # [TV2 - Kenneth] Web Admin & Điều hành đội xe (React 19 + TS + Tailwind + Recharts)
+│   ├── src/
+│   │   ├── api/                    # contract.ts, httpApi.ts (REST + SSE), mockApi.ts
+│   │   ├── components/             # Layout.tsx, AlertListItem.tsx (Ack + Gọi/Zalo), DriverCard.tsx, Charts.tsx, ParrotMascot.tsx
+│   │   ├── hooks/                  # useAuth.tsx, useLiveFeed.tsx, useAlarm.ts (Web Audio + Web Notification API)
+│   │   ├── pages/                  # Login, Dashboard, History, Drivers (+ Tạo tài xế & Mã ghép xe), DriverDetail, Stats, Settings
+│   │   └── types.ts
+│   ├── tests/                      # mock.spec.ts, http.spec.ts (Playwright E2E + responsive 320px–1920px)
+│   ├── .env.example                # VITE_USE_MOCK=true/false, API_PROXY_TARGET
+│   └── package.json                # Port dev 5174, preview 4174
+│
+├── frontend/                       # [TV2 - Kenneth] App Tài xế React 19 + TS + Vite + Tailwind + Capacitor Android
+│   ├── android/                    # Native Android project (Capacitor 8, MainActivity.java, usesCleartextTraffic)
 │   ├── public/
-│   │   ├── mediapipe/wasm/         # Bộ thực thi MediaPipe Vision WASM chạy offline trên thiết bị
+│   │   ├── mediapipe/wasm/         # Bộ thực thi MediaPipe Vision WASM (chép tự động từ scripts/copy-ai-assets.mjs)
 │   │   └── models/
 │   │       └── face_landmarker.task# Model FaceLandmarker đóng gói sẵn trong APK
-│   ├── scripts/
-│   │   └── copy-ai-assets.mjs      # Script tự động chép WASM + model vào public/ trước khi build
 │   ├── src/
 │   │   ├── ai/
 │   │   │   └── driverAnalyzer.ts   # On-Device AI (port từ ai/inference/analyzer.py & quality.py)
-│   │   ├── components/             # ParrotMascot.tsx (Vẹt xanh SVG) + các component buồng lái cũ
+│   │   ├── components/             # ParrotMascot.tsx (Vẹt xanh SVG), DriverConnectSheet.tsx (Server/Auth/Pair)
 │   │   ├── config/
-│   │   │   └── env.ts              # Tự động định tuyến qua Vite Proxy (HTTPS/WSS)
+│   │   │   └── env.ts              # Cấu hình URL máy chủ động (VITE_BACKEND_URL / localStorage)
 │   │   ├── features/
-│   │   │   ├── driver/             # DriverScreen.tsx (UI Grab mới) & DriverMonitor.tsx (UI cũ)
-│   │   │   └── admin/              # AdminStub.tsx (Stub cho Milestone 4)
-│   │   ├── hooks/                  # useDriverAI, useBellAlarm, useWakeLock, useCamera (đổi cam trước/sau)
-│   │   ├── services/               # api.ts (REST), monitorSocket.ts (WebSocket)
+│   │   │   └── driver/             # DriverScreen.tsx (UI Grab tối giản + đồng bộ M3)
+│   │   ├── hooks/                  # useDriverAI, useDriverSync (Session/Heartbeat/Events/Offline), useBellAlarm, useWakeLock, useCamera
+│   │   ├── services/               # m3Api.ts (CapacitorHttp native + fetch), offlineQueue.ts, api.ts, monitorSocket.ts
 │   │   └── types/
-│   │       └── monitor.ts          # Contract types & Enums
-│   ├── capacitor.config.ts         # Cấu hình Capacitor (appId: com.predrive.ai, appName: PreDrive AI)
-│   ├── vite.config.ts              # Cấu hình @vitejs/plugin-basic-ssl (HTTPS) + Proxy (/api, /ws, /health)
+│   │       ├── monitor.ts          # Contract types (M1/M2)
+│   │       └── m3.ts               # Contract types M3
+│   ├── capacitor.config.ts         # Cấu hình Capacitor (appId: com.predrive.ai, androidScheme: 'https')
+│   ├── vite.config.ts              # HTTPS (:5173) + Proxy (/api, /ws, /health)
 │   └── package.json
+├── scripts/
+│   ├── copy-ai-assets.mjs          # Script thống nhất chép MediaPipe WASM + face_landmarker.task vào frontend/public/
+│   ├── seed.py                     # Chạy seed DB mẫu 30 ngày
+│   └── simulate_driver.py          # Giả lập luồng App Tài xế gửi Session/Heartbeat/Events/Offline batch
 ├── tools/                          # Bộ công cụ build Android độc lập (Corretto JDK 21 + Android SDK 36)
-├── PreDrive-debug.apk              # File cài đặt Android hoàn chỉnh (~17.8 MB, chạy offline On-Device AI)
+├── PreDrive-debug.apk              # File cài đặt Android hoàn chỉnh (On-Device AI + Đồng bộ M3 + Offline Queue)
 │
 ├── docs/
-│   └── api-contract.md             # Tài liệu chuẩn hóa giao thức API Contract v0.1
+│   ├── api-contract.md             # Hợp đồng API Contract v0.3 (M3 + Legacy WS)
+│   └── openapi.json                # OpenAPI schema export
 ├── venv/                           # Môi trường ảo Python 3.11.9 đã cài đủ thư viện
-├── run_project.ps1                 # Script PowerShell khởi chạy tự động cả Backend + Frontend
+├── run_project.ps1                 # Script PowerShell khởi chạy Backend + Frontend
 ├── PROJECT_CONTEXT.md              # File tổng quan hệ thống này
+├── PLAN_CONTEXT.md                 # Kế hoạch triển khai Giai đoạn 1 -> 3
 ├── AI_CONTEXT.md                   # Context chi tiết cho TV1 (AI)
 ├── FRONTEND_CONTEXT.md             # Context chi tiết cho TV2 (Frontend)
 └── BACKEND_CONTEXT.md              # Context chi tiết cho TV3 (Backend)
@@ -86,45 +106,45 @@ d:\CDIO4\
 
 ---
 
-## 3. Kiến trúc Luồng Dữ liệu Thực tế (End-to-End Architecture)
+## 3. Kiến trúc Luồng Dữ liệu Thực tế (End-to-End Architecture — M3)
 
 ```mermaid
 flowchart TD
-    subgraph Client ["📱 Thiết bị Tài xế (iPhone Safari / Android Chrome / PC)"]
-        UI["React + TS PWA (Port 5173 HTTPS)"]
-        Cam["Camera trước (getUserMedia 4 FPS)"]
-        Audio["Web Audio API Alert"]
+    subgraph DriverApp ["📱 App Tài xế (Android APK / PWA :5173)"]
+        Cam["Camera + On-Device AI\n(@mediapipe/tasks-vision WASM, 10 FPS)"]
+        Parrot["UI Grab + Vẹt xanh + Chuông báo"]
+        Sync["useDriverSync + Offline Queue\n(CapacitorHttp / Fetch + localStorage)"]
     end
 
-    subgraph ViteProxy ["🔒 Vite HTTPS & WSS Reverse Proxy (:5173)"]
-        Proxy["SSL Termination (@vitejs/plugin-basic-ssl)\nProxy /api, /health -> http://127.0.0.1:8000\nProxy /ws -> ws://127.0.0.1:8000"]
+    subgraph Server ["🖥️ Máy chủ Backend FastAPI (:8000)"]
+        Auth["JWT Auth + RBAC\n(manager / dispatcher / driver)"]
+        API["REST API M3 (/api/v1/*)\nSessions, Heartbeat, Events Batch, Pairing"]
+        Watchdog["Heartbeat Watchdog\n(Phát hiện DISCONNECTED)"]
+        SSE["SSE Broker\n(/api/v1/live/stream)"]
+        DB[("SQLite WAL / PostgreSQL\n+ Alembic")]
     end
 
-    subgraph Server ["🖥️ Máy chủ Python (Local PC / Server)"]
-        Gateway["FastAPI Gateway (Port 8000)\nSession TTL | Frame Validation | Rate Limit (10 FPS)"]
-        subgraph AIModule ["🧠 Python AI Module (ai/)"]
-            Qual["Image Quality Check\n(Brightness & Laplacian Blur)"]
-            MP["MediaPipe FaceLandmarker\n(478 Landmarks 3D)"]
-            Metrics["EAR (Mắt) + Head Pose (Mũi)\n+ Per-Session Timer"]
-        end
+    subgraph AdminWeb ["💻 Web Admin & Trực ban (:5174)"]
+        Dashboard["Live Dashboard + Lịch sử + Thống kê + Cài đặt"]
+        AlertUI["Chuông Web Audio + Web Notification API\n+ Gọi (tel:) / Nhắn Zalo (zalo.me)"]
     end
 
-    Cam -->|"JPEG Base64 (4 FPS)"| UI
-    UI <-->|"HTTPS / WSS (Cùng Origin :5173)"| Proxy
-    Proxy <-->|"HTTP / WS nội bộ"| Gateway
-    Gateway -->|"NumPy BGR Frame + session_id"| Qual
-    Qual -->|"GOOD / LOW_LIGHT / BLURRY"| MP
-    Qual -->|"TOO_DARK"| Gateway
-    MP --> Metrics
-    Metrics -->|"AIAnalysisOutput"| Gateway
-    Gateway -->|"analysis_result JSON"| Proxy
-    UI -->|"WARNING / CRITICAL"| Audio
+    Cam --> Parrot
+    Cam -->|"Trạng thái & Sự kiện metadata\n(KHÔNG gửi ảnh/video)"| Sync
+    Sync -->|"HTTPS / HTTP LAN (CapacitorHttp)\nTự gửi bù khi có mạng lại"| API
+    Auth --> API
+    API --> DB
+    Watchdog --> DB
+    API -->|"driver_state / alert / ack"| SSE
+    Watchdog -->|"DISCONNECTED alert"| SSE
+    SSE -->|"text/event-stream"| Dashboard
+    Dashboard --> AlertUI
 ```
 
-### Giải pháp kỹ thuật quan trọng cho Điện thoại (Mobile HTTPS Proxy):
-- Trình duyệt di động (đặc biệt là **Safari trên iOS**) bắt buộc trang web phải chạy trên **`https://` (Secure Context)** mới cấp quyền `navigator.mediaDevices.getUserMedia` (Camera).
-- Nếu Frontend chạy `https://` nhưng gọi trực tiếp sang Backend `http://...:8000` hoặc `ws://...:8000`, trình duyệt sẽ chặn do lỗi **Mixed Content** hoặc lỗi chứng chỉ SSL trên cổng 8000.
-- **Giải pháp đã triển khai:** Sử dụng `@vitejs/plugin-basic-ssl` tạo HTTPS ngay trên cổng `5173` và cấu hình **Vite Proxy** trong `frontend/vite.config.ts` chuyển tiếp toàn bộ `/api`, `/health`, và `/ws` về `127.0.0.1:8000`. Nhờ đó, điện thoại chỉ cần truy cập duy nhất `https://<IP-LAN>:5173` là vừa mở được Camera vừa kết nối WebSocket mượt mà.
+### Giải pháp kỹ thuật quan trọng cho App Mobile & Web:
+- **On-Device AI trên App Tài xế:** AI (`DriverAnalyzer`) chạy trực tiếp trên điện thoại bằng MediaPipe WASM nên không truyền video thô về máy chủ, vẫn cảnh báo tức thì ngay cả khi mất sóng 4G.
+- **Mixed Content trên Android APK:** WebView Capacitor chạy trên `https://localhost` (Secure Context bắt buộc cho Camera `getUserMedia`), trong khi tầng gọi API M3 (`frontend/src/services/m3Api.ts`) dùng **`CapacitorHttp.request`** + `android:usesCleartextTraffic="true"` khi chạy native để gọi thẳng tới backend `http://<IP-LAN>:8000` hoặc tunnel `https://` mà không bị WebView chặn Mixed Content/CORS.
+- **Tương thích ngược M1/M2 (PWA Research):** Cổng `:5173` vẫn giữ `@vitejs/plugin-basic-ssl` + proxy `/api`, `/health`, `/ws` và backend giữ `WS /ws/monitor` (tùy chọn tắt AI phía server bằng `PREDRIVE_ENABLE_LEGACY_AI=0` khi chạy chế độ M3-only).
 
 ---
 
@@ -221,54 +241,70 @@ flowchart TD
 
 ## 6. Hướng dẫn Khởi chạy & Kiểm thử
 
-### 6.1. Khởi chạy toàn bộ hệ thống (1-Click)
-Tại thư mục gốc `d:\CDIO4`, mở PowerShell và chạy:
-```powershell
-powershell -ExecutionPolicy Bypass -File .\run_project.ps1
-```
-Hoặc chạy thủ công trên 2 cửa sổ terminal:
-- **Terminal 1 (Backend + AI):**
+### 6.1. Khởi chạy hệ thống phát triển cục bộ
+- **Terminal 1 (Backend FastAPI M3 + Legacy WS — `:8000`):**
   ```powershell
   cd d:\CDIO4
-  $env:PYTHONPATH = "d:\CDIO4"
-  .\venv\Scripts\python.exe -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --reload
+  $env:PYTHONPATH = "d:\CDIO4;d:\CDIO4\backend"
+  .\venv\Scripts\python.exe -m uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload
   ```
-- **Terminal 2 (Frontend HTTPS):**
+- **Terminal 2 (Web Admin & Điều hành — `:5174`):**
+  Đảm bảo `admin-web/.env` có `VITE_USE_MOCK=false`, `VITE_API_URL=/api/v1`, `API_PROXY_TARGET=http://127.0.0.1:8000`:
+  ```powershell
+  cd d:\CDIO4\admin-web
+  npm run dev
+  ```
+- **Terminal 3 (Driver App Web/PWA — `:5173`, tùy chọn nếu không dùng `.apk`):**
   ```powershell
   cd d:\CDIO4\frontend
   npm run dev
   ```
 
-### 6.2. Truy cập trên Máy tính & Điện thoại
-- **Trên máy tính (PC):** Mở trình duyệt vào `https://localhost:5173/`
-- **Trên điện thoại (cùng mạng Wi-Fi/LAN):**
-  1. Mở Safari (iPhone) hoặc Chrome (Android), nhập `https://<IP-MÁY-TÍNH>:5173/` (ví dụ: `https://192.168.0.106:5173/`).
-  2. Bỏ qua cảnh báo chứng chỉ tự ký: Nhấn **Hiển thị chi tiết (Advanced)** $\rightarrow$ **Tiếp tục truy cập trang web (Proceed)**.
-  3. Nhấn **BẮT ĐẦU GIÁM SÁT** $\rightarrow$ Cho phép quyền **Camera**.
-  4. Kiểm tra góc trên bên trái hiện **`Server: Đã kết nối`** (chấm xanh lá) và `Model ID: baseline-mediapipe-v0.1`.
+### 6.2. Tài khoản mẫu Seed DB (`backend/app/services/seed.py`)
+| Vai trò | Tên đăng nhập | Mật khẩu | Ghi chú |
+|---|---|---|---|
+| **Quản lý (`manager`)** | `manager` | `manager123` | Toàn quyền Web Admin (gồm Cài đặt, Thêm tài xế, Tạo mã ghép xe) |
+| **Người trực (`dispatcher`)** | `dispatcher` | `dispatcher123` | Giám sát trực tiếp, Gọi/Zalo, Xác nhận liên hệ (`ack`) |
+| **Tài xế (`driver`)** | `driver1` .. `driver5` | `driver123` | Dùng trên App Tài xế; mã ghép xe mẫu `PAIR01` .. `PAIR05` |
 
 ### 6.3. Chạy Bộ Kiểm thử Tự động (Automated Tests)
-```powershell
-cd d:\CDIO4
-$env:PYTHONPATH = "d:\CDIO4;d:\CDIO4\backend"
-.\venv\Scripts\python.exe -m pytest ai/tests backend/tests -v
-```
-- `ai/tests/test_analyzer.py`: **4/4 PASSED**
-- `backend/tests/test_gateway.py`: **8/8 PASSED**
+- **Backend & AI (`pytest`):**
+  ```powershell
+  cd d:\CDIO4
+  $env:PYTHONPATH = "d:\CDIO4;d:\CDIO4\backend"
+  .\venv\Scripts\python.exe -m pytest ai/tests backend/tests -v
+  ```
+  - `ai/tests/test_analyzer.py`: **4/4 PASSED**
+  - `backend/tests/test_gateway.py`: **8/8 PASSED**
+  - `backend/tests/test_m3_backend.py`: **6/6 PASSED**
+- **Web Admin (`admin-web`):**
+  ```powershell
+  cd d:\CDIO4\admin-web
+  npm run typecheck
+  npm run lint
+  npm run build
+  npm test
+  ```
+- **Driver App (`frontend`):**
+  ```powershell
+  cd d:\CDIO4\frontend
+  npm run lint
+  npm run build
+  ```
 
 ---
 
-## 7. Lộ trình Tiếp theo (Milestones M3 → M6)
+## 7. Lộ trình Milestones (M1 → M6)
 
 | Milestone | Nội dung công việc | Trạng thái |
 |---|---|---|
 | **M1: Camera PWA ↔ FastAPI** | Quyền camera, HTTPS proxy, session, truyền frame WS, đo latency, xử lý mất kết nối. | ✅ **HOÀN THÀNH** |
 | **M2: AI Baseline** | Tích hợp MediaPipe FaceLandmarker, tính EAR, Head Pose, đánh giá chất lượng ảnh, cảnh báo thời gian thực. | ✅ **HOÀN THÀNH** |
-| **M3: Database & Auth** | Lưu trữ PostgreSQL/SQLite (`users`, `drivers`, `trips`, `events`, `alerts`), xác thực JWT/Session. | ⏳ Chuẩn bị triển khai |
-| **M4: Admin Dashboard & Telegram** | Giao diện thống kê chuyến đi/sự kiện bằng Recharts, gửi cảnh báo nghiêm trọng qua Telegram Bot. | ⏳ Kế hoạch |
-| **M5: Low-light Research** | Thực nghiệm so sánh `Original vs CLAHE vs Zero-DCE++` trên tập dữ liệu thiếu sáng, đo FPS/Recall. | ⏳ Kế hoạch |
-| **M6: Early Prediction & Evaluation** | Đánh giá định lượng trên NTHU-DDD / RLDD và thử nghiệm mô hình chuỗi thời gian (GRU/TCN). | ⏳ Kế hoạch |
-| **M2.5: Mobile App (Android) + On-Device AI + UI mới** | Đóng gói `frontend/` thành app Android (Capacitor), chạy MediaPipe trực tiếp trên điện thoại, giao diện tối giản phong cách Grab có mascot Vẹt xanh (xem Mục 9). | ✅ **HOÀN THÀNH (`PreDrive-debug.apk`)** |
+| **M2.5: Mobile App (Android) + On-Device AI** | Đóng gói `frontend/` thành app Android (Capacitor), chạy MediaPipe trực tiếp trên điện thoại, giao diện tối giản phong cách Grab có mascot Vẹt xanh. | ✅ **HOÀN THÀNH (`PreDrive-debug.apk`)** |
+| **M3: Database, Auth & Đồng bộ App** | SQLite WAL/PostgreSQL + Alembic, JWT Auth, SSE, Watchdog, đồng bộ Phiên/Heartbeat/Events & Hàng đợi Offline trên App Tài xế. | ✅ **HOÀN THÀNH** |
+| **M4 (Điều hành): Web Admin & Cảnh báo** | Giao diện điều hành `admin-web/`, Gọi/Nhắn Zalo miễn phí trên Dashboard & Hồ sơ, Web Notification khi ẩn tab, Tạo tài xế & Mã ghép xe. | ✅ **HOÀN THÀNH (Phương án A)** |
+| **M5: Low-light Research** | Thực nghiệm so sánh `Original vs CLAHE vs Zero-DCE++` trên tập dữ liệu thiếu sáng, đo FPS/Recall. | ⏳ Giai đoạn 4 (Kế hoạch) |
+| **M6: Early Prediction & Evaluation** | Đánh giá định lượng trên NTHU-DDD / RLDD và thử nghiệm mô hình chuỗi thời gian (GRU/TCN). | ⏳ Giai đoạn 4 (Kế hoạch) |
 
 ---
 
@@ -316,21 +352,21 @@ $env:PYTHONPATH = "d:\CDIO4;d:\CDIO4\backend"
 - **Màu sắc & font (`frontend/src/index.css`):** màu chính **xanh Grab `#00B14F`** (nhấn `#009A44`, nền nhạt `#E5F7ED`), chữ đen `#1C1C1C` / xám `#5E6366`, viền `#E8E8E8`, nhắc nhở cam `#F5A623`, nguy hiểm đỏ `#E5372B`. Font **`Be Vietnam Pro`** cài offline qua `@fontsource/be-vietnam-pro` (400/500/600/700).
 
 ### 9.4. Hướng dẫn Build lại file `.apk` khi sửa code Frontend
-Bộ công cụ JDK 21 (Amazon Corretto 21) và Android SDK 36 đã được cài đặt sẵn tại `D:\CDIO4\tools` (không làm ảnh hưởng biến môi trường hệ thống). Khi cần build lại `.apk`, mở PowerShell chạy:
+Bộ công cụ JDK 21 (Amazon Corretto 21) và Android SDK 36 đã được cài đặt sẵn tại `D:\CDIO4\tools` (không làm ảnh hưởng biến môi trường hệ thống). Luôn chạy `clean` trước `:app:assembleDebug` để Gradle không đóng gói lại bundle cũ:
 ```powershell
 $env:JAVA_HOME = "D:\CDIO4\tools\jdk21\jdk21.0.13_0"
 $env:ANDROID_HOME = "D:\CDIO4\tools\android-sdk"
 $env:GRADLE_USER_HOME = "D:\CDIO4\tools\gradle-home"
 
 cd D:\CDIO4\frontend
-node scripts/copy-ai-assets.mjs
 npm run build
 npx cap sync android
 
 cd D:\CDIO4\frontend\android
-.\gradlew.bat assembleDebug --no-daemon
+.\gradlew.bat clean :app:assembleDebug --no-daemon
 Copy-Item "D:\CDIO4\frontend\android\app\build\outputs\apk\debug\app-debug.apk" "D:\CDIO4\PreDrive-debug.apk" -Force
 ```
+*(Ghi chú: `npm run build` trong `frontend/` tự động chạy `prebuild: node ../scripts/copy-ai-assets.mjs` để đồng bộ MediaPipe WASM và `face_landmarker.task` trước khi đóng gói).*
 
 ### 9.5. Trạng thái các bước triển khai Mobile App (M2.5)
 1. ✅ Người dùng duyệt bản preview Vẹt xanh núp mép phải (`predrive_ui_concepts.html`).

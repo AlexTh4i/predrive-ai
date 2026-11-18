@@ -1,17 +1,16 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ParrotMascot } from '../../components/ParrotMascot';
 import type { ParrotMood } from '../../components/ParrotMascot';
+import { DriverConnectSheet } from '../../components/DriverConnectSheet';
 import { useCamera } from '../../hooks/useCamera';
 import { useDriverAI } from '../../hooks/useDriverAI';
+import { useDriverSync } from '../../hooks/useDriverSync';
 import { useBellAlarm } from '../../hooks/useBellAlarm';
 import { useWakeLock } from '../../hooks/useWakeLock';
 
-export interface DriverScreenProps {
-  onOpenAdmin?: () => void;
-}
-
-export function DriverScreen({ onOpenAdmin }: DriverScreenProps = {}) {
+export function DriverScreen() {
   const [isMonitoring, setIsMonitoring] = useState(false);
+  const [connectOpen, setConnectOpen] = useState(false);
 
   const {
     videoRef,
@@ -27,6 +26,25 @@ export function DriverScreen({ onOpenAdmin }: DriverScreenProps = {}) {
 
   const { aiStatus, aiError, result, load: loadAI, start: startAI, stop: stopAI } = useDriverAI(videoRef);
   const { isMuted, toggleMute, unlock, startRing, stopRing } = useBellAlarm();
+  const {
+    auth,
+    mode,
+    setMode,
+    serverUrl,
+    healthStatus,
+    healthError,
+    pendingCount,
+    syncStatus,
+    syncError,
+    saveAndTestServer,
+    login,
+    pairVehicle,
+    logout,
+    flushNow,
+    startSession,
+    reportAIState,
+    stopSession,
+  } = useDriverSync();
 
   useWakeLock(isMonitoring && isCameraActive);
 
@@ -41,6 +59,11 @@ export function DriverScreen({ onOpenAdmin }: DriverScreenProps = {}) {
   const isWarn =
     isMonitoring && (state === 'DROWSINESS_SIGNS' || state === 'DISTRACTED');
   const isUnavailable = isMonitoring && state === 'MONITORING_UNAVAILABLE';
+
+  // Đồng bộ trạng thái AI & sự kiện lên máy chủ M3 (hoặc hàng đợi offline)
+  useEffect(() => {
+    reportAIState(result, isMonitoring && isCameraActive);
+  }, [result, isMonitoring, isCameraActive, reportAIState]);
 
   // Đồng bộ chuông báo động khi CRITICAL
   useEffect(() => {
@@ -58,6 +81,12 @@ export function DriverScreen({ onOpenAdmin }: DriverScreenProps = {}) {
       stopRing();
       stopCamera();
       setIsMonitoring(false);
+      await stopSession();
+      return;
+    }
+
+    if (mode === 'online' && !auth) {
+      setConnectOpen(true);
       return;
     }
 
@@ -65,8 +94,22 @@ export function DriverScreen({ onOpenAdmin }: DriverScreenProps = {}) {
     if (camOk && aiOk) {
       setIsMonitoring(true);
       startAI();
+      void startSession();
     }
-  }, [isMonitoring, unlock, stopAI, stopRing, stopCamera, startCamera, loadAI, startAI]);
+  }, [
+    isMonitoring,
+    mode,
+    auth,
+    unlock,
+    stopAI,
+    stopRing,
+    stopCamera,
+    stopSession,
+    startCamera,
+    loadAI,
+    startAI,
+    startSession,
+  ]);
 
   const handleFlipCamera = useCallback(async () => {
     await flipCamera();
@@ -200,16 +243,37 @@ export function DriverScreen({ onOpenAdmin }: DriverScreenProps = {}) {
         </div>
 
         <div className="flex items-center gap-2">
-          {onOpenAdmin && (
-            <button
-              type="button"
-              onClick={onOpenAdmin}
-              className="inline-flex items-center h-8 px-3 rounded-full bg-slate-900/80 hover:bg-slate-800 border border-cyan-500/40 text-cyan-400 text-xs font-semibold shadow-sm transition-colors cursor-pointer"
-              title="Vào giao diện Quản trị viên (Admin)"
-            >
-              Quản trị
-            </button>
-          )}
+          <button
+            type="button"
+            onClick={() => setConnectOpen(true)}
+            className="inline-flex items-center gap-1.5 h-8 px-3 rounded-full bg-black/55 hover:bg-black/75 backdrop-blur-sm text-white text-xs font-medium transition-colors cursor-pointer"
+            title="Cài đặt kết nối văn phòng & tài khoản tài xế"
+          >
+            <span
+              className="w-2 h-2 rounded-full shrink-0"
+              style={{
+                background:
+                  syncStatus === 'auth_expired'
+                    ? '#E5372B'
+                    : syncStatus === 'offline_queued' || pendingCount > 0
+                      ? '#F5A623'
+                      : mode === 'online' && auth
+                        ? '#00B14F'
+                        : '#8A8F93',
+              }}
+            />
+            <span className="max-w-[120px] truncate">
+              {mode === 'online' && auth
+                ? pendingCount > 0
+                  ? `Chờ gửi (${pendingCount})`
+                  : auth.vehicleName
+                    ? auth.vehicleName.split(' ')[0]
+                    : auth.user.fullName
+                : mode === 'online'
+                  ? 'Đăng nhập'
+                  : 'Dùng thử'}
+            </span>
+          </button>
           <div className="inline-flex items-center h-8 px-3 rounded-full bg-black/45 backdrop-blur-sm text-white text-xs font-medium">
             {facing === 'user' ? 'Camera trước' : 'Camera sau'}
           </div>
@@ -361,13 +425,40 @@ export function DriverScreen({ onOpenAdmin }: DriverScreenProps = {}) {
         </div>
 
         <div
-          className="mt-2 flex justify-between px-1 text-xs"
+          className="mt-2 flex items-center justify-between px-1 text-xs"
           style={{ color: 'var(--grab-ink-2)' }}
         >
           <span className="w-14 text-center">{isMuted ? 'Đã tắt' : 'Âm thanh'}</span>
+          <span className="text-[11px] truncate max-w-[170px] text-center">
+            {mode === 'online' && auth
+              ? pendingCount > 0
+                ? `Hàng đợi offline: ${pendingCount}`
+                : `${auth.user.fullName}`
+              : 'Chế độ ngoại tuyến'}
+          </span>
           <span className="w-14 text-center">Đổi cam</span>
         </div>
       </div>
+
+      <DriverConnectSheet
+        open={connectOpen}
+        onClose={() => setConnectOpen(false)}
+        auth={auth}
+        mode={mode}
+        onModeChange={setMode}
+        serverUrl={serverUrl}
+        healthStatus={healthStatus}
+        healthError={healthError}
+        pendingCount={pendingCount}
+        syncStatus={syncStatus}
+        syncError={syncError}
+        isMonitoring={isMonitoring}
+        onSaveAndTestServer={saveAndTestServer}
+        onLogin={login}
+        onPair={pairVehicle}
+        onLogout={logout}
+        onFlushNow={flushNow}
+      />
     </div>
   );
 }

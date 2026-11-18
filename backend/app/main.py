@@ -11,10 +11,8 @@ import time
 from typing import Any
 from uuid import UUID, uuid4
 
-import cv2
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-import numpy as np
 from PIL import Image, UnidentifiedImageError
 from pydantic import ValidationError
 from sqlalchemy import select
@@ -24,7 +22,19 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fil
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from ai import DriverMonitorAI
+try:
+    import cv2
+    import numpy as np
+    from ai import DriverMonitorAI
+
+    _LEGACY_AI_AVAILABLE = True
+    _LEGACY_AI_IMPORT_ERROR: str | None = None
+except ImportError as exc:
+    cv2 = None  # type: ignore[assignment]
+    np = None  # type: ignore[assignment]
+    DriverMonitorAI = Any  # type: ignore[assignment,misc]
+    _LEGACY_AI_AVAILABLE = False
+    _LEGACY_AI_IMPORT_ERROR = str(exc)
 from .core import database as db_mod
 from .core.config import get_config
 from .core.errors import register_error_handlers
@@ -95,10 +105,21 @@ async def lifespan(_: FastAPI):
                 seed_database(db)
                 logger.info("Đã hoàn tất seed dữ liệu mẫu M3.")
 
-    # 2. Initialize AI Model for M1/M2 WebSocket gateway
-    logger.info("Đang khởi tạo AI Model...")
-    ai_analyzer = DriverMonitorAI()
-    logger.info("AI Model đã sẵn sàng!")
+    # 2. Initialize AI Model for M1/M2 WebSocket gateway (optional in M3-only mode)
+    enable_legacy_ai = os.getenv("PREDRIVE_ENABLE_LEGACY_AI", "1") == "1"
+    if enable_legacy_ai and _LEGACY_AI_AVAILABLE:
+        logger.info("Đang khởi tạo AI Model...")
+        ai_analyzer = DriverMonitorAI()
+        logger.info("AI Model đã sẵn sàng!")
+    else:
+        ai_analyzer = None
+        if not enable_legacy_ai:
+            logger.info("Chạy ở chế độ M3-only (PREDRIVE_ENABLE_LEGACY_AI=0).")
+        else:
+            logger.warning(
+                "Thiếu dependency module ai/ (%s) — chạy backend ở chế độ M3-only.",
+                _LEGACY_AI_IMPORT_ERROR,
+            )
 
     # 3. Start background watchdog task for M3 session heartbeat monitoring
     stop_event = asyncio.Event()
@@ -132,7 +153,9 @@ origins = [
     o.strip()
     for o in os.getenv(
         "PREDRIVE_ALLOWED_ORIGINS",
-        "http://localhost:5173,https://localhost:5173,http://127.0.0.1:5173",
+        "http://localhost:5173,https://localhost:5173,http://127.0.0.1:5173,"
+        "http://localhost:5174,http://127.0.0.1:5174,http://localhost:4174,http://127.0.0.1:4174,"
+        "https://localhost,http://localhost,capacitor://localhost",
     ).split(",")
     if o.strip()
 ]
@@ -249,7 +272,7 @@ async def monitor(websocket: WebSocket, session_id: str) -> None:
             last_frame_id = frame.frame_id
             processed_at = datetime.now(timezone.utc)
 
-            if ai_analyzer is not None:
+            if ai_analyzer is not None and cv2 is not None and np is not None:
                 nparr = np.frombuffer(raw_bytes, np.uint8)
                 frame_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                 ai_output = ai_analyzer.analyze(frame_bgr, session_id=str(parsed_session))

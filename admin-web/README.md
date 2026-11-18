@@ -34,7 +34,14 @@ Mock có sáu tài xế hư cấu, lịch sử 28 ngày và trạng thái thay �
 
 ## Kết nối backend M3
 
-Sao chép `.env.example` thành `.env.local`, đặt `VITE_USE_MOCK=false`, rồi khởi động lại Vite. Giữ `VITE_API_URL=/api/v1` và đặt `API_PROXY_TARGET` theo máy chủ backend để dùng proxy Vite. Nếu gọi trực tiếp khác origin, đặt `VITE_API_URL` thành URL đầy đủ có đuôi `/api/v1` và cấu hình CORS cho frontend.
+Sao chép `.env.example` thành `.env` (hoặc `.env.local`), đặt `VITE_USE_MOCK=false`, rồi khởi động lại Vite. Giữ `VITE_API_URL=/api/v1` và đặt `API_PROXY_TARGET` theo máy chủ backend để dùng proxy Vite. Nếu gọi trực tiếp khác origin, đặt `VITE_API_URL` thành URL đầy đủ có đuôi `/api/v1` và cấu hình CORS cho frontend.
+
+Tài khoản seed thật trên backend M3 (`backend/app/services/seed.py`):
+
+| Tên đăng nhập | Mật khẩu | Quyền |
+| --- | --- | --- |
+| `manager` | `manager123` | Xem, ghi nhận liên hệ, tạo tài xế/mã ghép xe, sửa cài đặt |
+| `dispatcher` | `dispatcher123` | Xem và ghi nhận liên hệ (không sửa cài đặt) |
 
 Web gửi JWT qua header Bearer cho REST và SSE, kiểm tra phiên qua `GET /auth/me` khi tải lại và yêu cầu đăng nhập lại nếu gặp 401. Hai chế độ dùng cùng interface trong `src/api/contract.ts`. Xem [ghi chú tích hợp](docs/api-integration-notes.md) và [nghiên cứu Web Admin](../docs/research-web.md).
 

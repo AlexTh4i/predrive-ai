@@ -65,7 +65,7 @@ export function Login() {
               {submitting ? 'Đang đăng nhập…' : 'Đăng nhập'} {submitting ? <LoaderCircle className="spin" size={18} aria-hidden /> : <ArrowRight size={18} aria-hidden />}
             </button>
           </form>
-          {isMock && <div className="demo-credentials">
+          {isMock ? <div className="demo-credentials">
             <div className="demo-heading"><FlaskConical size={16} aria-hidden /> <strong>Tài khoản mô phỏng</strong></div>
             <p>Chọn vai trò để điền thông tin đăng nhập.</p>
             <div className="demo-options">
@@ -75,7 +75,11 @@ export function Login() {
                 }}><demo.icon size={16} aria-hidden />{demo.label}</button>
               ))}
             </div>
-          </div>}
+          </div> : (
+            <p className="login-hint muted">
+              Tài khoản seed máy chủ M3: <code>manager</code> / <code>manager123</code> · <code>dispatcher</code> / <code>dispatcher123</code>
+            </p>
+          )}
         </div>
       </section>
     </main>

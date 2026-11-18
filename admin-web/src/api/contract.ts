@@ -1,6 +1,6 @@
 import type {
-  AlertEvent, DateRange, Driver, DriverDetail, DriverStats, EventPage, EventQuery,
-  HourlyStats, LiveDriverState, LoginResult, RankingEntry, Settings, SystemHealth, User,
+  AlertEvent, CreateDriverPayload, CreatePairingCodePayload, DateRange, Driver, DriverDetail, DriverStats, EventPage, EventQuery,
+  HourlyStats, LiveDriverState, LoginResult, PairingCodeResult, RankingEntry, Settings, SystemHealth, User,
 } from '../types';
 
 export const SESSION_EXPIRED = 'predrive:session-expired';
@@ -27,6 +27,8 @@ export interface AdminApi {
   getEvents(query: EventQuery, signal?: AbortSignal): Promise<EventPage>;
   ackEvent(id: string, note: string): Promise<AlertEvent>;
   getDrivers(signal?: AbortSignal): Promise<Driver[]>;
+  createDriver(payload: CreateDriverPayload): Promise<Driver>;
+  createPairingCode(payload?: CreatePairingCodePayload): Promise<PairingCodeResult>;
   getDriver(id: string, signal?: AbortSignal): Promise<DriverDetail>;
   getDriverStats(id: string, range: DateRange, signal?: AbortSignal): Promise<DriverStats>;
   getHourly(range: DateRange, signal?: AbortSignal): Promise<HourlyStats[]>;

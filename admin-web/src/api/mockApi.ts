@@ -194,6 +194,41 @@ export const mockApi: AdminApi = {
     return updated;
   },
   async getDrivers(signal) { await pause(signal); operator(); return demoDrivers; },
+  async createDriver(payload) {
+    await pause();
+    if (operator().role !== 'manager') throw new ApiError('Chỉ quản lý có thể tạo tài xế.', 403);
+    const created = {
+      id: `driver-mock-${Date.now()}`,
+      fullName: payload.fullName.trim(),
+      phone: payload.phone.trim(),
+      vehicleId: payload.vehicleId || `veh-mock-${Date.now()}`,
+      vehicleName: payload.vehicleName?.trim() || 'Chưa phân xe',
+      avatarUrl: null,
+    };
+    demoDrivers.push(created);
+    live.push({
+      driverId: created.id,
+      fullName: created.fullName,
+      phone: created.phone,
+      vehicleName: created.vehicleName,
+      state: 'OFFLINE',
+      sessionId: null,
+      continuousDrivingSec: 0,
+      totalDrivingSec: 0,
+      drowsyCountToday: 0,
+      lastHeartbeatAt: null,
+      location: null,
+    });
+    return created;
+  },
+  async createPairingCode(payload = {}) {
+    await pause();
+    if (operator().role !== 'manager') throw new ApiError('Chỉ quản lý có thể tạo mã ghép xe.', 403);
+    const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    const code = Array.from({ length: 6 }, () => alphabet[Math.floor(Math.random() * alphabet.length)]).join('');
+    const minutes = payload.expiresInMinutes ?? 60;
+    return { code, expiresAt: new Date(Date.now() + minutes * 60_000).toISOString() };
+  },
   async getDriver(id, signal) {
     await pause(signal);
     operator();

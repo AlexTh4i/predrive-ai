@@ -48,7 +48,7 @@ function newerDriver(previous: LiveDriverState | undefined, next: LiveDriverStat
   return Date.parse(previous.lastHeartbeatAt) > Date.parse(next.lastHeartbeatAt) ? previous : next;
 }
 
-export function useLiveFeed(onCritical: () => void) {
+export function useLiveFeed(onCritical: (alert?: AlertEvent) => void) {
   const [connection, setConnection] = useState<Connection>('connecting');
   const [drivers, setDrivers] = useState<LiveDriverState[]>([]);
   const [alerts, setAlerts] = useState<AlertEvent[]>([]);
@@ -85,7 +85,7 @@ export function useLiveFeed(onCritical: () => void) {
         if (!eligible(alert)) return;
         if (alert.level === 'CRITICAL' && !alert.ackAt && !acks.current.has(alert.id) && !seenCritical.current.has(alert.id)) {
           seenCritical.current.add(alert.id);
-          notify.current();
+          notify.current(alert);
         }
         setAlerts((previous) => {
           const map = new Map(previous.map((item) => [item.id, item]));
@@ -188,7 +188,7 @@ export function useLiveFeed(onCritical: () => void) {
 
 const FeedContext = createContext<ReturnType<typeof useLiveFeed> | null>(null);
 
-export function LiveFeedProvider({ children, onCritical }: { children: ReactNode; onCritical: () => void }) {
+export function LiveFeedProvider({ children, onCritical }: { children: ReactNode; onCritical: (alert?: AlertEvent) => void }) {
   const feed = useLiveFeed(onCritical);
   return <FeedContext.Provider value={feed}>{children}</FeedContext.Provider>;
 }

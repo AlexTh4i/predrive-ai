@@ -277,7 +277,14 @@ def acknowledge_event(
     v_id = ev.vehicle_id or (drv.vehicle_id if drv else None)
     v_name = vehicle_map.get(v_id, "Chưa phân xe") if v_id else "Chưa phân xe"
 
-    return event_to_schema(ev, d_name, v_name)
+    ack_schema = event_to_schema(ev, d_name, v_name)
+    if not ev.delayed:
+        sse_broker.publish(
+            current_user.organization_id,
+            "alert",
+            ack_schema.model_dump(mode="json"),
+        )
+    return ack_schema
 
 
 # --- DRIVERS ---

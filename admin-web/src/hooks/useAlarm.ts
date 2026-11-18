@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { eventLabels } from '../components/ui';
+import type { AlertEvent } from '../types';
 
 const baseTitle = 'PreDrive AI · Điều hành đội xe';
 
@@ -29,6 +31,13 @@ export function useAlarm() {
       setEnabled(false);
       return;
     }
+    if (
+      typeof Notification !== 'undefined' &&
+      Notification.permission === 'default' &&
+      typeof Notification.requestPermission === 'function'
+    ) {
+      void Notification.requestPermission().catch(() => undefined);
+    }
     try {
       audio.current ??= new AudioContext();
       await audio.current.resume();
@@ -40,10 +49,35 @@ export function useAlarm() {
       setError('Trình duyệt chưa cho phép phát âm báo.');
     }
   }
-  const notify = useCallback(() => {
+  const notify = useCallback((alert?: AlertEvent) => {
     if (document.hidden) {
       unread.current += 1;
       document.title = `(${unread.current}) Cảnh báo nguy hiểm · PreDrive AI`;
+      if (
+        active.current &&
+        typeof Notification !== 'undefined' &&
+        Notification.permission === 'granted'
+      ) {
+        try {
+          const title = alert
+            ? `NGUY HIỂM: ${alert.driverName}`
+            : 'Cảnh báo nguy hiểm · PreDrive AI';
+          const body = alert
+            ? `${alert.vehicleName} · ${eventLabels[alert.type]} — Bấm để mở trung tâm điều hành`
+            : 'Phát hiện tài xế có dấu hiệu nguy hiểm cần liên hệ ngay.';
+          const notification = new Notification(title, {
+            body,
+            tag: alert?.id ?? 'predrive-critical',
+            requireInteraction: true,
+          });
+          notification.onclick = () => {
+            window.focus();
+            notification.close();
+          };
+        } catch {
+          // Bỏ qua nếu môi trường trình duyệt không hỗ trợ khởi tạo Notification trực tiếp
+        }
+      }
     }
     const context = audio.current;
     if (!active.current || context?.state !== 'running') return;

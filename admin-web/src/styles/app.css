@@ -296,6 +296,20 @@
 .demo-credentials p { margin: 5px 0 10px; color: var(--muted); }
 .demo-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .demo-options .button { padding-inline: 7px; font-size: 12px; }
+.login-hint { margin-top: 16px; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.alert-quick-contact { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.alert-quick-contact .button { min-height: 32px; padding-inline: 10px; font-size: 12px; }
+.driver-admin-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.driver-admin-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.driver-admin-grid label { display: grid; gap: 6px; font-size: 12px; font-weight: 600; color: var(--text); min-width: 0; }
+.driver-admin-grid :is(input, select) { width: 100%; font-size: 13px; font-weight: 500; }
+.driver-admin-wide { grid-column: 1 / -1; }
+.driver-admin-feedback { margin-top: 10px; }
+.driver-admin-success { display: flex; align-items: center; gap: 7px; margin-top: 10px; padding: 10px 12px; border-radius: 9px; background: var(--brand-soft); color: var(--brand-ink); font-size: 13px; font-weight: 600; }
+.driver-admin-submit { margin-top: 14px; display: flex; justify-content: flex-end; }
+.pairing-result { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-top: 14px; padding: 14px; border-radius: 12px; border: 1px dashed var(--brand-ink); background: var(--brand-soft); }
+.pairing-result > div { display: grid; gap: 2px; }
+.pairing-code { font-size: 24px; letter-spacing: .16em; color: var(--brand-dark); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 
 .filter-panel, .page-section { margin-bottom: 18px; }
 .filter-heading { display: flex; align-items: center; gap: 9px; margin-bottom: 14px; }
@@ -441,6 +455,8 @@
   .alert-jump { gap: 5px; padding-inline: 7px; }
   .alert-jump > svg:last-child { display: none; }
   .settings-fields { grid-template-columns: minmax(0, 1fr); }
+  .driver-admin-grid { grid-template-columns: minmax(0, 1fr); }
+  .driver-admin-submit .button { width: 100%; }
   .settings-actions { justify-content: stretch; width: 100%; }
   .settings-actions .button { flex: 1; padding-inline: 7px; font-size: 12px; }
   .profile-header { padding: 14px; gap: 10px; }

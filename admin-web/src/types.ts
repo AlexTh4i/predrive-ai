@@ -132,3 +132,22 @@ export interface SystemHealth {
   unavailableRate: number;
   disconnectedCount: number;
 }
+
+export interface CreateDriverPayload {
+  fullName: string;
+  phone: string;
+  username?: string;
+  password?: string;
+  vehicleId?: string;
+  vehicleName?: string;
+}
+
+export interface CreatePairingCodePayload {
+  vehicleId?: string;
+  expiresInMinutes?: number;
+}
+
+export interface PairingCodeResult {
+  code: string;
+  expiresAt: string;
+}

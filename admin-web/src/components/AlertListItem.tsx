@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
-import { AlertTriangle, BellRing, Check, Clock3, RadioTower, WifiOff, X } from 'lucide-react';
+import { AlertTriangle, BellRing, Check, Clock3, MessageCircle, Phone, RadioTower, WifiOff, X } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { useFeed } from '../hooks/useLiveFeed';
 import { errorMessage } from '../hooks/useResource';
-import { dayKey, dayOf, formatClock, formatDateTime, formatDayLabel } from '../lib/format';
+import { dayKey, dayOf, formatClock, formatDateTime, formatDayLabel, normalizePhone } from '../lib/format';
 import type { AlertEvent } from '../types';
 import { eventLabels } from './ui';
 
@@ -69,6 +69,9 @@ export function Acknowledge({ alert, onSaved }: { alert: AlertEvent; onSaved?: (
 }
 
 export function AlertListItem({ alert }: { alert: AlertEvent }) {
+  const { drivers } = useFeed();
+  const phone = drivers.find((driver) => driver.driverId === alert.driverId)?.phone ?? '';
+  const normalizedPhone = normalizePhone(phone);
   const critical = alert.level === 'CRITICAL';
   const day = dayOf(alert.capturedAt);
   const clock = formatClock(alert.capturedAt);
@@ -88,6 +91,21 @@ export function AlertListItem({ alert }: { alert: AlertEvent }) {
           {critical ? <RadioTower size={12} aria-hidden /> : <AlertTriangle size={12} aria-hidden />}
           {critical ? 'Nguy hiểm' : 'Cảnh báo'}
         </span>
+        {normalizedPhone && (
+          <div className="alert-quick-contact">
+            <a className="button button-primary button-small" href={`tel:${normalizedPhone}`}>
+              <Phone size={13} aria-hidden /> Gọi
+            </a>
+            <a
+              className="button button-secondary button-small"
+              href={`https://zalo.me/${normalizedPhone.slice(1)}`}
+              target="_blank"
+              rel="noreferrer"
+            >
+              <MessageCircle size={13} aria-hidden /> Nhắn Zalo
+            </a>
+          </div>
+        )}
         <Acknowledge alert={alert} />
       </div>
     </li>
