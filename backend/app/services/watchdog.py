@@ -15,6 +15,7 @@ from ..models.models import (
     EventModel,
     HeartbeatModel,
     LocationModel,
+    Organization,
     OrgSettings,
     RefreshToken,
     SessionModel,
@@ -29,6 +30,7 @@ from .mappers import (
     get_or_create_org_settings,
 )
 from .notify import notify_user
+from .risk_report_service import compute_organization_risk_scores
 from .sse import sse_broker
 
 logger = logging.getLogger("predrive.watchdog")
@@ -405,9 +407,12 @@ async def watchdog_loop(stop_event: asyncio.Event) -> None:
                 check_pending_escalations(db)
                 ticks += 1
                 now_ts = datetime.now(timezone.utc).timestamp()
-                # Run full retention purge once on startup and every 24h thereafter (P2-6)
+                # Run full retention purge + risk score refresh once on startup and every 24h thereafter (P2-6 / P3-6)
                 if now_ts - last_daily_purge >= 86400 or ticks % 720 == 0:
                     purge_expired_organization_data(db)
+                    for org in db.scalars(select(Organization).where(Organization.is_active.is_(True))).all():
+                        for p_type in ("shift", "weekly", "monthly"):
+                            compute_organization_risk_scores(db, org.id, period_type=p_type)  # type: ignore[arg-type]
                     last_daily_purge = now_ts
         except Exception as exc:
             logger.warning("Watchdog cycle error: %s", exc)

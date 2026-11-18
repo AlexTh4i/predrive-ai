@@ -35,6 +35,7 @@ frontend/android/app/src/main/assets/public/
 *.db-wal
 *.db-shm
 backups/
+backend/data/
 *.dump
 *.dump.sha256
 admin-web/dist/

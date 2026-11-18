@@ -593,3 +593,33 @@ class PushTokenItem(CamelModel):
     updatedAt: UtcDatetime
 
 
+class RiskWeightsInput(CamelModel):
+    wCritical: Optional[float] = Field(default=None, ge=0.0, le=100.0)
+    wDrowsy: Optional[float] = Field(default=None, ge=0.0, le=100.0)
+    wDistraction: Optional[float] = Field(default=None, ge=0.0, le=100.0)
+    wOvertime: Optional[float] = Field(default=None, ge=0.0, le=100.0)
+    shiftHoursNorm: Optional[float] = Field(default=None, ge=1.0, le=24.0)
+
+
+class RecomputeRiskScoresRequest(CamelModel):
+    periodType: Literal["shift", "weekly", "monthly"] = "weekly"
+    periodStart: Optional[str] = None
+    periodEnd: Optional[str] = None
+    weights: Optional[RiskWeightsInput] = None
+
+
+class RiskScoreItem(CamelModel):
+    id: str
+    driverId: str
+    driverName: str
+    periodType: Literal["shift", "weekly", "monthly"]
+    periodStart: str
+    periodEnd: str
+    score: int
+    riskLevel: Literal["low", "medium", "high"]
+    eventsCount: int
+    drowsyEvents: int
+    distractionEvents: int
+    drivingHours: float
+
+

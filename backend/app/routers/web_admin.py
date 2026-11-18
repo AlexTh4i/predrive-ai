@@ -3,11 +3,11 @@ from collections.abc import AsyncGenerator
 from datetime import datetime, timedelta, timezone
 import random
 import string
-from typing import Optional
+from typing import Literal, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, Body, Depends, Query, Request, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -34,6 +34,7 @@ from ..models.models import (
     Pairing,
     PushToken,
     ReportModel,
+    RiskScore,
     SessionModel,
     User,
     Vehicle,
@@ -70,8 +71,10 @@ from ..schemas.m3 import (
     PaginatedEventsResponse,
     PairingCodeResponse,
     PushTokenItem,
+    RecomputeRiskScoresRequest,
     RegisterPushTokenRequest,
     ReportItem,
+    RiskScoreItem,
     SettingsSchema,
     SystemHealthResponse,
     UnregisterPushTokenRequest,
@@ -90,6 +93,12 @@ from ..services.mappers import (
 )
 from ..services.sse import sse_broker
 from ..services.rest_service import find_nearest_rest_stops
+from ..services.risk_report_service import (
+    RiskWeights,
+    compute_organization_risk_scores,
+    generate_report_file,
+    resolve_reports_base_dir,
+)
 
 router = APIRouter(prefix="/api/v1", tags=["Web Admin & Dispatcher"])
 
@@ -1129,6 +1138,7 @@ def export_report_endpoint(
     )
     db.add(rep)
     db.flush()
+    generate_report_file(db, rep)
     record_audit_log(
         db,
         organization_id=org_id,
@@ -1209,6 +1219,139 @@ def get_report_by_id(
         storagePath=rep.storage_path,
         createdAt=ensure_utc(rep.created_at),  # type: ignore[arg-type]
     )
+
+
+@router.get("/reports/{id}/download")
+def download_report_file(
+    id: str,
+    current_user: User = Depends(require_roles("manager")),
+    db: Session = Depends(get_db),
+) -> FileResponse:
+    org_id = get_jwt_org_id(current_user)
+    rep = db.get(ReportModel, id)
+    if rep is None or rep.organization_id != org_id:
+        raise AppError(
+            status.HTTP_404_NOT_FOUND,
+            "REPORT_NOT_FOUND",
+            "Không tìm thấy báo cáo trong tổ chức",
+        )
+
+    file_path = resolve_reports_base_dir() / org_id / f"{rep.id}.{rep.file_format}"
+    if not file_path.exists():
+        file_path = generate_report_file(db, rep)
+
+    media_type = (
+        "application/pdf"
+        if rep.file_format == "pdf"
+        else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    filename = f"predrive-{rep.report_type}-{rep.period_start.isoformat()}-to-{rep.period_end.isoformat()}.{rep.file_format}"
+    return FileResponse(path=str(file_path), media_type=media_type, filename=filename)
+
+
+@router.get("/risk-scores", response_model=list[RiskScoreItem])
+def list_risk_scores(
+    periodType: Literal["shift", "weekly", "monthly"] = Query(default="weekly"),
+    current_user: User = Depends(require_roles("manager")),
+    db: Session = Depends(get_db),
+) -> list[RiskScoreItem]:
+    org_id = get_jwt_org_id(current_user)
+    rows = db.scalars(
+        select(RiskScore)
+        .where(
+            RiskScore.organization_id == org_id,
+            RiskScore.period_type == periodType,
+        )
+        .order_by(RiskScore.period_end.desc(), RiskScore.score.desc())
+    ).all()
+    if not rows:
+        rows = compute_organization_risk_scores(db, org_id, period_type=periodType)
+    drv_map = {
+        u.id: u.full_name
+        for u in db.scalars(select(User).where(User.organization_id == org_id)).all()
+    }
+    return [
+        RiskScoreItem(
+            id=r.id,
+            driverId=r.driver_id,
+            driverName=drv_map.get(r.driver_id, "Tài xế"),
+            periodType=r.period_type,  # type: ignore[arg-type]
+            periodStart=r.period_start.isoformat(),
+            periodEnd=r.period_end.isoformat(),
+            score=int(r.score),
+            riskLevel=r.risk_level,  # type: ignore[arg-type]
+            eventsCount=int(r.events_count),
+            drowsyEvents=int(r.drowsy_events),
+            distractionEvents=int(r.distraction_events),
+            drivingHours=float(r.driving_hours),
+        )
+        for r in rows
+    ]
+
+
+@router.post("/risk-scores/recompute", response_model=list[RiskScoreItem])
+def recompute_risk_scores_endpoint(
+    payload: RecomputeRiskScoresRequest = Body(default=RecomputeRiskScoresRequest()),
+    current_user: User = Depends(require_roles("manager")),
+    db: Session = Depends(get_db),
+) -> list[RiskScoreItem]:
+    from datetime import date
+
+    org_id = get_jwt_org_id(current_user)
+    p_start = date.fromisoformat(payload.periodStart) if payload.periodStart else None
+    p_end = date.fromisoformat(payload.periodEnd) if payload.periodEnd else None
+
+    base_w = RiskWeights.from_env()
+    if payload.weights is not None:
+        w = RiskWeights(
+            w_critical=payload.weights.wCritical
+            if payload.weights.wCritical is not None
+            else base_w.w_critical,
+            w_drowsy=payload.weights.wDrowsy
+            if payload.weights.wDrowsy is not None
+            else base_w.w_drowsy,
+            w_distraction=payload.weights.wDistraction
+            if payload.weights.wDistraction is not None
+            else base_w.w_distraction,
+            w_overtime=payload.weights.wOvertime
+            if payload.weights.wOvertime is not None
+            else base_w.w_overtime,
+            shift_hours_norm=payload.weights.shiftHoursNorm
+            if payload.weights.shiftHoursNorm is not None
+            else base_w.shift_hours_norm,
+        )
+    else:
+        w = base_w
+
+    rows = compute_organization_risk_scores(
+        db=db,
+        org_id=org_id,
+        period_type=payload.periodType,
+        period_start=p_start,
+        period_end=p_end,
+        weights=w,
+    )
+    drv_map = {
+        u.id: u.full_name
+        for u in db.scalars(select(User).where(User.organization_id == org_id)).all()
+    }
+    return [
+        RiskScoreItem(
+            id=r.id,
+            driverId=r.driver_id,
+            driverName=drv_map.get(r.driver_id, "Tài xế"),
+            periodType=r.period_type,  # type: ignore[arg-type]
+            periodStart=r.period_start.isoformat(),
+            periodEnd=r.period_end.isoformat(),
+            score=int(r.score),
+            riskLevel=r.risk_level,  # type: ignore[arg-type]
+            eventsCount=int(r.events_count),
+            drowsyEvents=int(r.drowsy_events),
+            distractionEvents=int(r.distraction_events),
+            drivingHours=float(r.driving_hours),
+        )
+        for r in rows
+    ]
 
 
 # --- GPS & FLEET MAP (P3-1) ---

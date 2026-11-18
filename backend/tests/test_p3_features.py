@@ -840,3 +840,171 @@ def test_p3_7_fcm_push_tokens_registration_and_closed_tab_delivery(
     finally:
         fcm_server.shutdown()
         fcm_server.server_close()
+
+
+def test_p3_6_risk_scores_and_pdf_excel_report_export_manager_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from datetime import date, time
+    import io
+
+    from openpyxl import load_workbook
+    from sqlalchemy import select
+
+    from app.core import database as db_mod
+    from app.models.models import EventModel, SessionModel, User
+    from app.services.mappers import VN_TZ, to_vn_time
+
+    reports_dir = tmp_path / "generated_reports"
+    monkeypatch.setenv("PREDRIVE_REPORTS_DIR", reports_dir.as_posix())
+    app = _setup_test_app(tmp_path, monkeypatch)
+
+    with TestClient(app) as client:
+        mgr = client.post(
+            "/api/v1/auth/login", json={"username": "manager", "password": "manager123"}
+        ).json()
+        mgr_token = mgr["accessToken"]
+        org_id = mgr["user"]["organizationId"]
+
+        mgr2_token = client.post(
+            "/api/v1/auth/login", json={"username": "manager2", "password": "manager123"}
+        ).json()["accessToken"]
+        disp_token = client.post(
+            "/api/v1/auth/login",
+            json={"username": "dispatcher", "password": "dispatcher123"},
+        ).json()["accessToken"]
+        drv_token = client.post(
+            "/api/v1/auth/login", json={"username": "driver1", "password": "driver123"}
+        ).json()["accessToken"]
+
+        # 1) RBAC: dispatcher & driver blocked (403) on risk-scores & reports
+        assert client.get("/api/v1/risk-scores", headers=_auth(disp_token)).status_code == 403
+        assert client.get("/api/v1/risk-scores", headers=_auth(drv_token)).status_code == 403
+        assert (
+            client.post("/api/v1/reports/export", json={}, headers=_auth(disp_token)).status_code
+            == 403
+        )
+
+        # 2) Compute risk_scores for shift, weekly, and monthly with configurable weights
+        for p_type in ("shift", "weekly", "monthly"):
+            rc = client.post(
+                "/api/v1/risk-scores/recompute",
+                json={
+                    "periodType": p_type,
+                    "weights": {
+                        "wCritical": 30.0,
+                        "wDrowsy": 15.0,
+                        "wDistraction": 8.0,
+                        "wOvertime": 10.0,
+                        "shiftHoursNorm": 8.0,
+                    },
+                },
+                headers=_auth(mgr_token),
+            )
+            assert rc.status_code == 200
+            items = rc.json()
+            assert len(items) >= 5
+            assert all(0 <= x["score"] <= 100 for x in items)
+            assert all(x["riskLevel"] in ("low", "medium", "high") for x in items)
+
+        # 3) Export monthly XLSX report and verify downloaded Excel numbers match manual DB queries 100%
+        today_vn = to_vn_time(datetime.now(timezone.utc)).date()
+        p_start = today_vn - timedelta(days=29)
+        p_end = today_vn
+
+        xlsx_exp = client.post(
+            "/api/v1/reports/export",
+            json={
+                "reportType": "monthly",
+                "fileFormat": "xlsx",
+                "periodStart": p_start.isoformat(),
+                "periodEnd": p_end.isoformat(),
+            },
+            headers=_auth(mgr_token),
+        )
+        assert xlsx_exp.status_code == 201
+        xlsx_id = xlsx_exp.json()["id"]
+
+        # Dispatcher (403) and Org 2 manager (404) cannot download Org 1 report
+        assert (
+            client.get(
+                f"/api/v1/reports/{xlsx_id}/download", headers=_auth(disp_token)
+            ).status_code
+            == 403
+        )
+        assert (
+            client.get(
+                f"/api/v1/reports/{xlsx_id}/download", headers=_auth(mgr2_token)
+            ).status_code
+            == 404
+        )
+
+        dl_xlsx = client.get(
+            f"/api/v1/reports/{xlsx_id}/download", headers=_auth(mgr_token)
+        )
+        assert dl_xlsx.status_code == 200
+        wb = load_workbook(io.BytesIO(dl_xlsx.content))
+        ws_sum = wb["TongHop"]
+        summary_kv = {ws_sum.cell(r, 1).value: ws_sum.cell(r, 2).value for r in range(2, 11)}
+
+        # Manual SQL ground-truth query
+        start_utc = datetime.combine(p_start, time.min, tzinfo=VN_TZ).astimezone(timezone.utc)
+        end_utc = datetime.combine(p_end, time.max, tzinfo=VN_TZ).astimezone(timezone.utc)
+        with db_mod.SessionLocal() as db:
+            org_drivers = db.scalars(
+                select(User).where(User.organization_id == org_id, User.role == "driver")
+            ).all()
+            expected_sessions = 0
+            expected_events = 0
+            expected_critical = 0
+            expected_hours = 0.0
+            for d in org_drivers:
+                d_sess = db.scalars(
+                    select(SessionModel).where(
+                        SessionModel.organization_id == org_id,
+                        SessionModel.driver_id == d.id,
+                        SessionModel.started_at >= start_utc,
+                        SessionModel.started_at <= end_utc,
+                    )
+                ).all()
+                d_ev = db.scalars(
+                    select(EventModel).where(
+                        EventModel.organization_id == org_id,
+                        EventModel.driver_id == d.id,
+                        EventModel.occurred_at >= start_utc,
+                        EventModel.occurred_at <= end_utc,
+                    )
+                ).all()
+                expected_sessions += len(d_sess)
+                expected_hours += round(
+                    sum(
+                        max(int(s.total_driving_sec or 0), int(s.continuous_driving_sec or 0))
+                        for s in d_sess
+                    )
+                    / 3600.0,
+                    1,
+                )
+                expected_events += len(d_ev)
+                expected_critical += sum(1 for e in d_ev if int(e.level) >= 3)
+
+        assert summary_kv["Tong tai xe"] == len(org_drivers)
+        assert summary_kv["Tong phien lai"] == expected_sessions
+        assert summary_kv["Tong gio lai"] == pytest.approx(round(expected_hours, 1))
+        assert summary_kv["Tong su kien"] == expected_events
+        assert summary_kv["Tong nguy hiem (Muc 3)"] == expected_critical
+
+        # 4) Export weekly PDF report and verify valid PDF download
+        pdf_exp = client.post(
+            "/api/v1/reports/export",
+            json={"reportType": "weekly", "fileFormat": "pdf"},
+            headers=_auth(mgr_token),
+        )
+        assert pdf_exp.status_code == 201
+        pdf_id = pdf_exp.json()["id"]
+        dl_pdf = client.get(
+            f"/api/v1/reports/{pdf_id}/download", headers=_auth(mgr_token)
+        )
+        assert dl_pdf.status_code == 200
+        assert dl_pdf.headers["content-type"].startswith("application/pdf")
+        assert dl_pdf.content.startswith(b"%PDF-")
+        assert len(dl_pdf.content) > 500
