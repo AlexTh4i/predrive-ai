@@ -1,8 +1,8 @@
 # PREDRIVE AI — PROJECT CONTEXT (TỔNG QUAN & TRẠNG THÁI HỆ THỐNG CẬP NHẬT)
 
-> **Phiên bản:** 3.0 (M3 Fullstack: Mobile App Android `.apk` ↔ FastAPI + SQLite/PostgreSQL ↔ Web Admin Điều hành) | **Ngày cập nhật:** 16/11/2026  
-> **Mới (v3.0):** **Đã hoàn thành nối thông Giai đoạn 1 → 3** — Hợp nhất toàn bộ **Backend M3 (`backend/`)** với DB SQLite WAL/PostgreSQL + JWT Auth + SSE + Watchdog, **Web Admin (`admin-web/`)** giao diện điều hành đội xe + Gọi/Zalo + Web Notification + Tạo tài xế & Mã ghép xe, và **App Tài xế (`frontend/` + `PreDrive-debug.apk`)** tích hợp On-Device AI (`@mediapipe/tasks-vision`) + Đăng nhập/Ghép xe + Heartbeat/Events + Hàng đợi Offline tự đồng bộ bù.  
-> **Trạng thái hiện tại:** Đã hoàn thành M1, M2, M2.5, M3 và Web Admin điều hành đội xe (Phương án A: Web Notification + Gọi/Nhắn Zalo).  
+> **Phiên bản:** 4.0 (Production Hardening — Phase 0 Hoàn tất: PostgreSQL 15 / Supabase 22-table RLS Schema + Dual DB Engine) | **Ngày cập nhật:** 18/11/2026  
+> **Mới (v4.0 — Phase 0):** Hoàn tất kiểm chứng `supabase/schema.sql` (22 bảng, UUID, Enum, RLS `rowsecurity=true`, Views, Functions) & `supabase/seed.sql` trên PostgreSQL 15 sạch; đồng bộ 100% SQLAlchemy ORM (`models.py`) + Alembic (`0002_production_v1`); hỗ trợ song song SQLite WAL (dev) và PostgreSQL/Supabase Pooler (`sslmode=require`, `prepare_threshold=None`); chặn tuyệt đối seed khi `ENV=production`; hoàn thiện `scripts/push_to_supabase.sh` và `scripts/hash_seed_passwords.py`.  
+> **Trạng thái hiện tại:** Đã hoàn thành M1 → M4 và **Phase 0 Production Hardening** (23/23 pytest trên cả SQLite & Postgres 15, 6/6 Playwright `admin-web`, build `frontend/` xanh).  
 >
 > **Nguồn thông tin chung cho cả ba thành viên và AI Coding Assistants (Codex / Antigravity).** Đọc file này trước, sau đó đọc `AI_CONTEXT.md`, `FRONTEND_CONTEXT.md`, `BACKEND_CONTEXT.md`, `PLAN_CONTEXT.md` và `docs/api-contract.md`.
 

@@ -302,4 +302,82 @@ def test_p0_4_production_startup_creates_zero_users(
             seed_database(db)
 
 
+def test_p0_5_push_to_supabase_script_dev_and_prod(isolated_pg_db: str):
+    import shutil
+    import subprocess
+
+    git_bash = Path(r"C:\Program Files\Git\bin\bash.exe")
+    if git_bash.exists():
+        bash_bin: str | None = str(git_bash)
+    else:
+        bash_bin = shutil.which("bash")
+    assert bash_bin is not None, "bash not found to run push_to_supabase.sh"
+
+    script_path = str((ROOT_DIR / "scripts" / "push_to_supabase.sh").as_posix())
+
+    # 1. Run in dev mode on isolated_pg_db
+    env_dev = os.environ.copy()
+    env_dev["SUPABASE_DB_URL"] = isolated_pg_db
+    env_dev["ENV"] = "development"
+    res_dev = subprocess.run(
+        [bash_bin, script_path],
+        cwd=str(ROOT_DIR),
+        env=env_dev,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert res_dev.returncode == 0, res_dev.stderr
+    assert "RLS verified: 22/22 tables have rowsecurity=true." in res_dev.stdout
+    assert "users" in res_dev.stdout and ": 20" in res_dev.stdout
+    assert "predrive_local_dev" not in res_dev.stdout
+    assert "predrive_local_dev" not in res_dev.stderr
+
+    # 2. Re-running against non-empty DB must safely abort (exit 3) without destructive drop
+    res_abort = subprocess.run(
+        [bash_bin, script_path],
+        cwd=str(ROOT_DIR),
+        env=env_dev,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert res_abort.returncode == 3
+
+    # 3. Run in ENV=production on a fresh DB -> skips seed.sql -> 0 users
+    prod_db_name = f"predrive_p0_prod_{uuid4().hex[:8]}"
+    admin_engine = create_engine(PG_TEST_ADMIN_URL, isolation_level="AUTOCOMMIT")
+    with admin_engine.connect() as conn:
+        conn.execute(text(f'CREATE DATABASE "{prod_db_name}"'))
+    prod_pg_url = PG_TEST_ADMIN_URL.rsplit("/", 1)[0] + f"/{prod_db_name}"
+    try:
+        env_prod = os.environ.copy()
+        env_prod["SUPABASE_DB_URL"] = prod_pg_url
+        env_prod["ENV"] = "production"
+        res_prod = subprocess.run(
+            [bash_bin, script_path],
+            cwd=str(ROOT_DIR),
+            env=env_prod,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert res_prod.returncode == 0, res_prod.stderr
+        assert "skipping supabase/seed.sql" in res_prod.stdout
+        assert "RLS verified: 22/22 tables have rowsecurity=true." in res_prod.stdout
+        assert "users                 : 0" in res_prod.stdout
+    finally:
+        with admin_engine.connect() as conn:
+            conn.execute(
+                text(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                    "WHERE datname = :db AND pid <> pg_backend_pid()"
+                ),
+                {"db": prod_db_name},
+            )
+            conn.execute(text(f'DROP DATABASE IF EXISTS "{prod_db_name}"'))
+        admin_engine.dispose()
+
+
+
 
