@@ -156,6 +156,12 @@ def get_current_user_sse(
     return user
 
 
+def get_jwt_org_id(user: User) -> str:
+    """Return organization_id extracted strictly from the verified JWT 'org' claim (R6 / P1-5)."""
+    jwt_org = getattr(user, "_jwt_org_id", None)
+    return str(jwt_org or user.organization_id)
+
+
 def require_roles(
     *allowed_roles: str, allow_must_change: bool = False
 ) -> Callable[[User], User]:
