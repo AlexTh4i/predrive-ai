@@ -95,15 +95,16 @@ driver_app_router.set_legacy_session_creator(_create_legacy_ws_session)
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global ai_analyzer
-    # 1. Initialize database schema & seed if empty
+    # 1. Initialize database schema & seed if empty (NEVER seed in production - R5 / P0-4)
+    cfg = get_config()
     db_mod.Base.metadata.create_all(bind=db_mod.engine)
-    if os.getenv("PREDRIVE_AUTO_SEED", "1") == "1":
+    if not cfg.is_production and os.getenv("PREDRIVE_AUTO_SEED", "1") == "1":
         with db_mod.SessionLocal() as db:
             has_org = db.scalar(select(Organization.id).limit(1))
             if has_org is None:
-                logger.info("Database trống — đang chạy seed dữ liệu mẫu M3...")
+                logger.info("Database trống — đang chạy seed dữ liệu mẫu dev...")
                 seed_database(db)
-                logger.info("Đã hoàn tất seed dữ liệu mẫu M3.")
+                logger.info("Đã hoàn tất seed dữ liệu mẫu dev.")
 
     # 2. Initialize AI Model for M1/M2 WebSocket gateway (optional in M3-only mode)
     enable_legacy_ai = os.getenv("PREDRIVE_ENABLE_LEGACY_AI", "1") == "1"
