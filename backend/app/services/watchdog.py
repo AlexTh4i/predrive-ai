@@ -59,25 +59,28 @@ def check_disconnected_sessions(
 
         elapsed = (now - ref_time).total_seconds()
         if elapsed > timeout_sec:
+            sess.status = "disconnected"
             sess.current_state = "DISCONNECTED"
             sess.warning_count += 1
 
+            ev_id = str(uuid4())
             ev = EventModel(
-                id=str(uuid4()),
+                id=ev_id,
                 organization_id=sess.organization_id,
                 session_id=sess.id,
                 driver_id=sess.driver_id,
                 vehicle_id=sess.vehicle_id,
+                client_event_id=f"disc-{ev_id}",
                 type="DISCONNECTED",
                 level="WARNING",
                 status="OPEN",
                 state="DISCONNECTED",
                 risk_score=None,
-                started_at=now,
+                occurred_at=now,
                 duration_sec=int(elapsed),
                 delayed=False,
                 captured_at=now,
-                received_at=now,
+                created_at=now,
             )
             db.add(ev)
             db.commit()
@@ -118,15 +121,15 @@ def cleanup_old_telemetry(
 ) -> int:
     """Delete heartbeats and locations older than retention_days."""
     now = ensure_utc(now_utc) or datetime.now(timezone.utc)
-    days = retention_days if retention_days is not None else get_config().heartbeat_retention_days
+    days = (
+        retention_days
+        if retention_days is not None
+        else get_config().heartbeat_retention_days
+    )
     cutoff = now - timedelta(days=days)
 
-    hb_res = db.execute(
-        delete(HeartbeatModel).where(HeartbeatModel.captured_at < cutoff)
-    )
-    loc_res = db.execute(
-        delete(LocationModel).where(LocationModel.captured_at < cutoff)
-    )
+    hb_res = db.execute(delete(HeartbeatModel).where(HeartbeatModel.ts < cutoff))
+    loc_res = db.execute(delete(LocationModel).where(LocationModel.ts < cutoff))
     db.commit()
     return int(hb_res.rowcount or 0) + int(loc_res.rowcount or 0)
 
@@ -149,4 +152,3 @@ async def watchdog_loop(stop_event: asyncio.Event) -> None:
             await asyncio.wait_for(stop_event.wait(), timeout=interval)
         except asyncio.TimeoutError:
             pass
-

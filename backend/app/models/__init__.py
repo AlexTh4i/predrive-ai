@@ -1,14 +1,30 @@
-"""SQLAlchemy 2.x ORM models for PreDrive AI Backend M3."""
+"""SQLAlchemy 2.x ORM models for PreDrive AI Backend (22 tables matching supabase/schema.sql)."""
+
 from .models import (
+    ApiKey,
+    AppUsageDaily,
+    AuditLog,
+    Consent,
+    Escalation,
+    EscalationPolicy,
     EventModel,
     HeartbeatModel,
     LocationModel,
     Organization,
     OrgSettings,
     Pairing,
+    PushToken,
+    RefreshToken,
+    ReportModel,
+    RestBreak,
+    RestStop,
+    RiskScore,
     SessionModel,
     User,
     Vehicle,
+    Webhook,
+    level_int_to_str,
+    level_str_to_int,
 )
 
 __all__ = [
@@ -21,5 +37,19 @@ __all__ = [
     "HeartbeatModel",
     "OrgSettings",
     "LocationModel",
+    "RestStop",
+    "RestBreak",
+    "EscalationPolicy",
+    "Escalation",
+    "RiskScore",
+    "ReportModel",
+    "AppUsageDaily",
+    "RefreshToken",
+    "AuditLog",
+    "PushToken",
+    "Consent",
+    "ApiKey",
+    "Webhook",
+    "level_int_to_str",
+    "level_str_to_int",
 ]
-

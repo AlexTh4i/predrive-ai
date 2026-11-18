@@ -211,13 +211,18 @@ def list_events(
     if driverId:
         filters.append(EventModel.driver_id == driverId)
     if from_dt:
-        filters.append(EventModel.started_at >= from_dt)
+        filters.append(EventModel.occurred_at >= from_dt)
     if to_dt:
-        filters.append(EventModel.started_at <= to_dt)
-    if level:
-        filters.append(EventModel.level == level)
+        filters.append(EventModel.occurred_at <= to_dt)
+    if level == "CRITICAL":
+        filters.append(EventModel.level == 3)
+    elif level == "WARNING":
+        filters.append(EventModel.level <= 2)
     if type:
-        filters.append(EventModel.type == type)
+        if type in ("DROWSINESS", "DROWSY"):
+            filters.append(EventModel.type.in_(("DROWSINESS", "DROWSY")))
+        else:
+            filters.append(EventModel.type == type)
     if acked is True:
         filters.append(EventModel.ack_at.is_not(None))
     elif acked is False:
@@ -227,7 +232,7 @@ def list_events(
     rows = db.scalars(
         select(EventModel)
         .where(*filters)
-        .order_by(EventModel.started_at.desc(), EventModel.received_at.desc())
+        .order_by(EventModel.occurred_at.desc(), EventModel.created_at.desc())
         .offset((page - 1) * pageSize)
         .limit(pageSize)
     ).all()
@@ -244,7 +249,9 @@ def list_events(
         d_name = drv.full_name if drv else "Tài xế"
         v_id = ev.vehicle_id or (drv.vehicle_id if drv else None)
         v_name = vehicle_map.get(v_id, "Chưa phân xe") if v_id else "Chưa phân xe"
-        items.append(event_to_schema(ev, d_name, v_name))
+        ack_usr = driver_map.get(ev.ack_by) if ev.ack_by else None
+        ack_name = ack_usr.full_name if ack_usr else None
+        items.append(event_to_schema(ev, d_name, v_name, ack_by_name=ack_name))
 
     return PaginatedEventsResponse(items=items, total=int(total))
 
@@ -265,9 +272,12 @@ def acknowledge_event(
         )
 
     now = datetime.now(timezone.utc)
-    ev.ack_by = current_user.full_name
+    ev.ack_by = current_user.id
     ev.ack_at = now
     ev.note = payload.note
+    m = dict(ev.metrics or {})
+    m["ack_by_name"] = current_user.full_name
+    ev.metrics = m
     db.commit()
     db.refresh(ev)
 
@@ -277,7 +287,9 @@ def acknowledge_event(
     v_id = ev.vehicle_id or (drv.vehicle_id if drv else None)
     v_name = vehicle_map.get(v_id, "Chưa phân xe") if v_id else "Chưa phân xe"
 
-    ack_schema = event_to_schema(ev, d_name, v_name)
+    ack_schema = event_to_schema(
+        ev, d_name, v_name, ack_by_name=current_user.full_name
+    )
     if not ev.delayed:
         sse_broker.publish(
             current_user.organization_id,
@@ -438,8 +450,8 @@ def get_stats_hourly(
     buckets = {h: {"warning": 0, "critical": 0} for h in range(24)}
 
     for ev in events:
-        vn_dt = to_vn_time(ev.started_at)
-        if ev.level == "CRITICAL":
+        vn_dt = to_vn_time(ev.occurred_at)
+        if ev.level >= 3:
             buckets[vn_dt.hour]["critical"] += 1
         else:
             buckets[vn_dt.hour]["warning"] += 1
@@ -648,6 +660,7 @@ def create_pairing_code(
         code=code,
         expires_at=expires_at,
         consented_at=None,
+        created_by=current_user.id,
         status="PENDING",
         created_at=now,
     )

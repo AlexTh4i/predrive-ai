@@ -133,3 +133,80 @@ def test_p0_1_schema_and_seed_sql_on_clean_postgres15(isolated_pg_db: str):
 
     updated = hash_unset_passwords(isolated_pg_db)
     assert updated == 20
+
+
+def _fetch_public_columns(conn_url: str) -> dict[tuple[str, str], tuple[str, str]]:
+    eng = create_engine(conn_url)
+    with eng.connect() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT table_name, column_name, udt_name, is_nullable "
+                "FROM information_schema.columns "
+                "WHERE table_schema = 'public' "
+                "  AND table_name NOT IN ('alembic_version', 'v_events_pending_escalation', 'v_driver_usage_7d') "
+                "ORDER BY table_name, column_name"
+            )
+        ).all()
+    eng.dispose()
+    return {(r[0], r[1]): (r[2], r[3]) for r in rows}
+
+
+def test_p0_2_alembic_and_models_match_schema_sql(
+    isolated_pg_db: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from alembic import command
+    from alembic.config import Config
+    from app.core.database import Base
+    import app.models.models  # noqa: F401
+
+    # 1. Run `alembic upgrade head` on clean Postgres 15 isolated_pg_db
+    monkeypatch.setenv("DATABASE_URL", isolated_pg_db)
+    alembic_cfg = Config(str(ROOT_DIR / "backend" / "alembic.ini"))
+    alembic_cfg.set_main_option(
+        "script_location", str(ROOT_DIR / "backend" / "migrations")
+    )
+    command.upgrade(alembic_cfg, "head")
+
+    alembic_cols = _fetch_public_columns(isolated_pg_db)
+    alembic_tables = {t for (t, _) in alembic_cols}
+    assert len(alembic_tables) == 22
+
+    # 2. Create a second clean Postgres DB using SQLAlchemy `Base.metadata.create_all`
+    orm_db_name = f"predrive_orm_{uuid4().hex[:8]}"
+    admin_engine = create_engine(PG_TEST_ADMIN_URL, isolation_level="AUTOCOMMIT")
+    with admin_engine.connect() as conn:
+        conn.execute(text(f'CREATE DATABASE "{orm_db_name}"'))
+    orm_url = PG_TEST_ADMIN_URL.rsplit("/", 1)[0] + f"/{orm_db_name}"
+    try:
+        orm_engine = create_engine(orm_url)
+        Base.metadata.create_all(bind=orm_engine)
+        orm_engine.dispose()
+        orm_cols = _fetch_public_columns(orm_url)
+    finally:
+        with admin_engine.connect() as conn:
+            conn.execute(
+                text(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                    "WHERE datname = :db AND pid <> pg_backend_pid()"
+                ),
+                {"db": orm_db_name},
+            )
+            conn.execute(text(f'DROP DATABASE IF EXISTS "{orm_db_name}"'))
+        admin_engine.dispose()
+
+    # Every (table, column) and nullability + Postgres udt_name must match between schema.sql/Alembic and ORM models!
+    assert set(orm_cols.keys()) == set(alembic_cols.keys())
+    for key, orm_meta in orm_cols.items():
+        alembic_meta = alembic_cols[key]
+        # Allow float4 vs float8 equivalence in Postgres (REAL vs DOUBLE PRECISION in Python Float)
+        udt_a, null_a = orm_meta
+        udt_b, null_b = alembic_meta
+        assert null_a == null_b, f"Nullability mismatch on {key}: ORM={null_a} vs SQL={null_b}"
+        if {udt_a, udt_b} != {"float4", "float8"}:
+            assert udt_a == udt_b, f"Type mismatch on {key}: ORM={udt_a} vs SQL={udt_b}"
+
+    # 3. Also verify `alembic upgrade head` works on clean SQLite
+    sqlite_url = f"sqlite:///{(tmp_path / 'alembic_sqlite.db').as_posix()}"
+    monkeypatch.setenv("DATABASE_URL", sqlite_url)
+    command.upgrade(alembic_cfg, "head")
+

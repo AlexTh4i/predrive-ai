@@ -45,7 +45,12 @@ ContractState = Literal[
 ]
 
 EventType = Literal[
+    "DROWSY",
     "DROWSINESS",
+    "DISTRACTED",
+    "HEAD_DOWN",
+    "TOO_DARK",
+    "NO_FACE",
     "LONG_DRIVING",
     "DISCONNECTED",
     "REST_CLAIM_REJECTED",
