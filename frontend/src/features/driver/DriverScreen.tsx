@@ -39,6 +39,8 @@ export function DriverScreen() {
     saveAndTestServer,
     login,
     pairVehicle,
+    acceptConsent,
+    changePassword,
     logout,
     flushNow,
     startSession,
@@ -85,7 +87,10 @@ export function DriverScreen() {
       return;
     }
 
-    if (mode === 'online' && !auth) {
+    if (
+      mode === 'online' &&
+      (!auth || auth.user.mustChangePassword || (!auth.user.hasConsented && !auth.consentedAt))
+    ) {
       setConnectOpen(true);
       return;
     }
@@ -456,6 +461,8 @@ export function DriverScreen() {
         onSaveAndTestServer={saveAndTestServer}
         onLogin={login}
         onPair={pairVehicle}
+        onAcceptConsent={acceptConsent}
+        onChangePassword={changePassword}
         onLogout={logout}
         onFlushNow={flushNow}
       />

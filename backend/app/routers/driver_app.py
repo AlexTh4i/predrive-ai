@@ -15,6 +15,7 @@ from ..core.database import get_db
 from ..core.errors import AppError
 from ..core.security import bearer_scheme, get_current_user, get_jwt_org_id, require_roles
 from ..models.models import (
+    Consent,
     EventModel,
     HeartbeatModel,
     LocationModel,
@@ -53,6 +54,26 @@ _legacy_session_creator: Optional[Callable[[], dict[str, Any]]] = None
 def set_legacy_session_creator(fn: Callable[[], dict[str, Any]]) -> None:
     global _legacy_session_creator
     _legacy_session_creator = fn
+
+
+def _require_driver_consent(db: Session, current_user: User) -> Consent:
+    org_id = get_jwt_org_id(current_user)
+    consent = db.scalar(
+        select(Consent)
+        .where(
+            Consent.user_id == current_user.id,
+            Consent.organization_id == org_id,
+            Consent.consent_type == "data_processing",
+        )
+        .order_by(Consent.accepted_at.desc())
+    )
+    if consent is None:
+        raise AppError(
+            status.HTTP_403_FORBIDDEN,
+            "CONSENT_REQUIRED",
+            "Tài xế chưa xác nhận đồng ý xử lý dữ liệu theo Nghị định 13/2023/NĐ-CP",
+        )
+    return consent
 
 
 def _get_owned_session(
@@ -205,6 +226,7 @@ def post_session_event(
     current_user: User = Depends(require_roles("driver")),
     db: Session = Depends(get_db),
 ) -> AlertEvent:
+    _require_driver_consent(db, current_user)
     sess = _get_owned_session(db, id, current_user)
     enforce_events_rate_limit(sess.id)
     alert_event, _ = upsert_session_event(
@@ -224,6 +246,7 @@ def post_session_events_batch(
     current_user: User = Depends(require_roles("driver")),
     db: Session = Depends(get_db),
 ) -> BatchEventsResponse:
+    _require_driver_consent(db, current_user)
     sess = _get_owned_session(db, id, current_user)
     enforce_events_rate_limit(sess.id)
     results: list[AlertEvent] = []
@@ -246,10 +269,14 @@ def post_session_heartbeat(
     current_user: User = Depends(require_roles("driver")),
     db: Session = Depends(get_db),
 ) -> HeartbeatResponse:
+    consent = _require_driver_consent(db, current_user)
     sess = _get_owned_session(db, id, current_user)
     enforce_heartbeat_rate_limit(sess.id)
     now = datetime.now(timezone.utc)
     captured_utc = ensure_utc(payload.capturedAt) or now
+
+    org_settings = get_or_create_org_settings(db, get_jwt_org_id(current_user))
+    allow_loc = bool(org_settings.share_location and consent.location_consent)
 
     hb = HeartbeatModel(
         organization_id=current_user.organization_id,
@@ -259,8 +286,8 @@ def post_session_heartbeat(
         image_quality=payload.imageQuality,
         vehicle_moving=payload.vehicleMoving,
         ts=captured_utc,
-        lat=payload.location.lat if payload.location else None,
-        lng=payload.location.lng if payload.location else None,
+        lat=payload.location.lat if (allow_loc and payload.location) else None,
+        lng=payload.location.lng if (allow_loc and payload.location) else None,
     )
     db.add(hb)
 
@@ -285,9 +312,8 @@ def post_session_heartbeat(
         sess.total_driving_sec = payload.continuousDrivingSec
     sess.last_heartbeat_at = now
 
-    # Store optional location ONLY when organization settings have shareLocation=True
-    org_settings = get_or_create_org_settings(db, current_user.organization_id)
-    if org_settings.share_location and payload.location is not None:
+    # Store optional location ONLY when BOTH org settings AND driver consent allow location
+    if allow_loc and payload.location is not None:
         loc_at = ensure_utc(payload.location.at) if payload.location.at else captured_utc
         db.add(
             LocationModel(

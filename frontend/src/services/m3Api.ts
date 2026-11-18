@@ -3,6 +3,7 @@ import { getServerUrl, isNativeApp, normalizeServerUrl } from '../config/env';
 import type {
   AuthUser,
   BatchEventsResponse,
+  ConsentStatusResponse,
   CreateSessionResponse,
   EndSessionRequest,
   HeartbeatRequest,
@@ -272,6 +273,28 @@ export const m3Api = {
     return requestJson('/api/v1/auth/me', {
       method: 'GET',
       token,
+      serverUrl,
+    });
+  },
+
+  getConsent(token: string, serverUrl?: string): Promise<ConsentStatusResponse> {
+    return requestJson('/api/v1/auth/consent', {
+      method: 'GET',
+      token,
+      serverUrl,
+    });
+  },
+
+  acceptConsent(
+    token: string,
+    locationConsent: boolean,
+    version = '2026-01',
+    serverUrl?: string,
+  ): Promise<ConsentStatusResponse> {
+    return requestJson('/api/v1/auth/consent', {
+      method: 'POST',
+      token,
+      body: { version, locationConsent, clipStorageConsent: false },
       serverUrl,
     });
   },
