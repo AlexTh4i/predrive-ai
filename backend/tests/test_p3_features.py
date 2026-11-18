@@ -161,3 +161,144 @@ def test_p3_1_gps_locations_live_map_trail_and_event_pin(
             headers=_auth(mgr2_token),
         )
         assert cross_res.status_code == 404
+
+
+def test_p3_3_multi_level_alerts_and_dynamic_settings_sync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from app.core import database as db_mod
+    from app.services.events_service import classify_alert_level_from_settings
+    from app.services.mappers import get_or_create_org_settings
+    from app.services.sse import sse_broker
+
+    app = _setup_test_app(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        mgr = client.post(
+            "/api/v1/auth/login", json={"username": "manager", "password": "manager123"}
+        ).json()
+        mgr_token = mgr["accessToken"]
+        org_id = mgr["user"]["organizationId"]
+
+        drv = client.post(
+            "/api/v1/auth/login", json={"username": "driver1", "password": "driver123"}
+        ).json()
+        drv_token = drv["accessToken"]
+
+        # Update dynamic 3-level thresholds in org settings without rebuilding app
+        cur_settings = client.get("/api/v1/settings", headers=_auth(mgr_token)).json()
+        cur_settings["level1Sec"] = 1.5
+        cur_settings["level2Sec"] = 3.0
+        cur_settings["level3Sec"] = 5.0
+        cur_settings["earThreshold"] = 0.26
+        put_res = client.put("/api/v1/settings", json=cur_settings, headers=_auth(mgr_token))
+        assert put_res.status_code == 200
+
+        # Driver fetches runtime config & opens session -> gets updated thresholds immediately
+        cfg_res = client.get("/api/v1/sessions/config", headers=_auth(drv_token))
+        assert cfg_res.status_code == 200
+        assert cfg_res.json()["level1Sec"] == pytest.approx(1.5)
+        assert cfg_res.json()["level2Sec"] == pytest.approx(3.0)
+        assert cfg_res.json()["level3Sec"] == pytest.approx(5.0)
+        assert cfg_res.json()["earThreshold"] == pytest.approx(0.26)
+
+        with db_mod.SessionLocal() as db:
+            org_s = get_or_create_org_settings(db, org_id)
+            assert classify_alert_level_from_settings(1.0, org_s) == 0
+            assert classify_alert_level_from_settings(1.6, org_s) == 1
+            assert classify_alert_level_from_settings(3.2, org_s) == 2
+            assert classify_alert_level_from_settings(5.1, org_s) == 3
+
+        now = datetime.now(timezone.utc)
+        sess_id = str(uuid4())
+        client.post(
+            "/api/v1/sessions",
+            json={"sessionId": sess_id, "startedAt": now.isoformat()},
+            headers=_auth(drv_token),
+        )
+
+        # Level 1 -> gentle_reminder, does NOT emit dispatcher SSE `alert`
+        sse_broker.clear_history(org_id)
+        ep_id = str(uuid4())
+        r_lvl1 = client.post(
+            f"/api/v1/sessions/{sess_id}/events",
+            json={
+                "eventId": ep_id,
+                "type": "DROWSINESS",
+                "level": "WARNING",
+                "severityLevel": 1,
+                "status": "OPEN",
+                "state": "DROWSINESS_SIGNS",
+                "riskScore": 0.55,
+                "startedAt": now.isoformat(),
+                "durationSec": 2,
+                "capturedAt": now.isoformat(),
+            },
+            headers=_auth(drv_token),
+        )
+        assert r_lvl1.status_code == 200
+        assert r_lvl1.json()["severityLevel"] == 1
+        assert r_lvl1.json()["alertAction"] == "gentle_reminder"
+        assert [m for m in sse_broker.get_recent_messages(org_id) if m["event"] == "alert"] == []
+
+        # Level 2 -> cabin_bell, upgrades same episode to severityLevel=2, still no dispatcher SSE `alert`
+        r_lvl2 = client.post(
+            f"/api/v1/sessions/{sess_id}/events",
+            json={
+                "eventId": ep_id,
+                "type": "DROWSINESS",
+                "level": "WARNING",
+                "severityLevel": 2,
+                "status": "OPEN",
+                "state": "DROWSINESS_SIGNS",
+                "riskScore": 0.80,
+                "startedAt": now.isoformat(),
+                "durationSec": 3,
+                "capturedAt": (now + timedelta(seconds=1)).isoformat(),
+            },
+            headers=_auth(drv_token),
+        )
+        assert r_lvl2.status_code == 200
+        assert r_lvl2.json()["severityLevel"] == 2
+        assert r_lvl2.json()["alertAction"] == "cabin_bell"
+        assert [m for m in sse_broker.get_recent_messages(org_id) if m["event"] == "alert"] == []
+
+        # Level 3 -> notify_dispatcher, upgrades to CRITICAL + ESCALATED and emits dispatcher SSE `alert`!
+        r_lvl3 = client.post(
+            f"/api/v1/sessions/{sess_id}/events",
+            json={
+                "eventId": ep_id,
+                "type": "DROWSINESS",
+                "level": "CRITICAL",
+                "severityLevel": 3,
+                "status": "ESCALATED",
+                "state": "CRITICAL",
+                "riskScore": 0.95,
+                "startedAt": now.isoformat(),
+                "durationSec": 5,
+                "capturedAt": (now + timedelta(seconds=3)).isoformat(),
+            },
+            headers=_auth(drv_token),
+        )
+        assert r_lvl3.status_code == 200
+        assert r_lvl3.json()["severityLevel"] == 3
+        assert r_lvl3.json()["level"] == "CRITICAL"
+        assert r_lvl3.json()["alertAction"] == "notify_dispatcher"
+        sse_alerts = [m for m in sse_broker.get_recent_messages(org_id) if m["event"] == "alert"]
+        assert len(sse_alerts) == 1
+
+        # Manager updates level3Sec live -> delivered to running Driver App on next heartbeat!
+        cur_settings["level3Sec"] = 6.5
+        client.put("/api/v1/settings", json=cur_settings, headers=_auth(mgr_token))
+        hb_res = client.post(
+            f"/api/v1/sessions/{sess_id}/heartbeat",
+            json={
+                "state": "NORMAL",
+                "imageQuality": "GOOD",
+                "continuousDrivingSec": 30,
+                "vehicleMoving": True,
+                "capturedAt": (now + timedelta(seconds=10)).isoformat(),
+            },
+            headers=_auth(drv_token),
+        )
+        assert hb_res.status_code == 200
+        assert hb_res.json()["settings"]["level3Sec"] == pytest.approx(6.5)

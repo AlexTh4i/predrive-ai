@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ParrotMascot } from '../../components/ParrotMascot';
 import type { ParrotMood } from '../../components/ParrotMascot';
 import { DriverConnectSheet } from '../../components/DriverConnectSheet';
@@ -24,7 +24,6 @@ export function DriverScreen() {
     flipCamera,
   } = useCamera();
 
-  const { aiStatus, aiError, result, load: loadAI, start: startAI, stop: stopAI } = useDriverAI(videoRef);
   const { isMuted, toggleMute, unlock, startRing, stopRing } = useBellAlarm();
   const {
     auth,
@@ -36,6 +35,7 @@ export function DriverScreen() {
     pendingCount,
     syncStatus,
     syncError,
+    settings,
     saveAndTestServer,
     login,
     pairVehicle,
@@ -48,6 +48,30 @@ export function DriverScreen() {
     stopSession,
   } = useDriverSync();
 
+  const dynamicThresholds = useMemo(
+    () => ({
+      earThreshold: settings.earThreshold,
+      level1Sec: settings.level1Sec,
+      level2Sec: settings.level2Sec,
+      level3Sec: settings.level3Sec,
+      distractedSec: settings.headPoseSec,
+      tooDarkBrightness: settings.tooDarkThreshold,
+    }),
+    [
+      settings.earThreshold,
+      settings.level1Sec,
+      settings.level2Sec,
+      settings.level3Sec,
+      settings.headPoseSec,
+      settings.tooDarkThreshold,
+    ],
+  );
+
+  const { aiStatus, aiError, result, load: loadAI, start: startAI, stop: stopAI } = useDriverAI(
+    videoRef,
+    dynamicThresholds,
+  );
+
   useWakeLock(isMonitoring && isCameraActive);
 
   // Tải trước model MediaPipe ngay khi mở ứng dụng để bấm nút là chạy ngay
@@ -56,10 +80,12 @@ export function DriverScreen() {
   }, [loadAI]);
 
   const state = isMonitoring && isCameraActive ? (result?.state ?? 'NORMAL') : 'NOT_EVALUATED';
+  const severityLevel = isMonitoring && isCameraActive ? (result?.severityLevel ?? 0) : 0;
   const imageQuality = result?.imageQuality ?? 'GOOD';
-  const isAlarm = isMonitoring && state === 'CRITICAL';
+  const isAlarm = isMonitoring && (state === 'CRITICAL' || severityLevel >= 3);
+  const shouldRingBell = isMonitoring && severityLevel >= 2;
   const isWarn =
-    isMonitoring && (state === 'DROWSINESS_SIGNS' || state === 'DISTRACTED');
+    isMonitoring && !isAlarm && (state === 'DROWSINESS_SIGNS' || state === 'DISTRACTED');
   const isUnavailable = isMonitoring && state === 'MONITORING_UNAVAILABLE';
 
   // Đồng bộ trạng thái AI & sự kiện lên máy chủ M3 (hoặc hàng đợi offline)
@@ -67,14 +93,14 @@ export function DriverScreen() {
     reportAIState(result, isMonitoring && isCameraActive);
   }, [result, isMonitoring, isCameraActive, reportAIState]);
 
-  // Đồng bộ chuông báo động khi CRITICAL
+  // Đồng bộ chuông báo động từ Mức 2 (chuông cabin) & Mức 3 (nguy hiểm + báo điều hành); Mức 1 chỉ nhắc nhẹ bằng hình ảnh
   useEffect(() => {
-    if (isAlarm) {
+    if (shouldRingBell) {
       startRing();
     } else {
       stopRing();
     }
-  }, [isAlarm, startRing, stopRing]);
+  }, [shouldRingBell, startRing, stopRing]);
 
   const handleToggleMonitoring = useCallback(async () => {
     unlock();
@@ -168,12 +194,16 @@ export function DriverScreen() {
     bannerSub = aiError;
     bannerColor = '#E5372B';
   } else if (isAlarm) {
-    bannerTitle = 'Dậy đi bác tài ơi!';
-    bannerSub = 'Bạn đang nhắm mắt khi lái xe';
+    bannerTitle = 'Mức 3 · Dậy đi bác tài ơi!';
+    bannerSub = 'Đã gửi cảnh báo khẩn về trung tâm điều hành';
     bannerColor = '#E5372B';
+  } else if (state === 'DROWSINESS_SIGNS' && severityLevel === 2) {
+    bannerTitle = 'Mức 2 · Chuông cabin: Tỉnh táo lại nhé!';
+    bannerSub = 'Nhắm mắt kéo dài — nên tìm trạm dừng nghỉ';
+    bannerColor = '#E57A1A';
   } else if (state === 'DROWSINESS_SIGNS') {
-    bannerTitle = 'Chíu chíu! Hơi lim dim rồi đó';
-    bannerSub = 'Tấp vào nghỉ chút nhé?';
+    bannerTitle = 'Mức 1 · Nhắc nhẹ: Hơi lim dim rồi đó';
+    bannerSub = 'Chớp mắt và hít thở sâu nhé';
     bannerColor = '#F5A623';
   } else if (state === 'DISTRACTED') {
     bannerTitle = 'Chíu chíu! Nhìn thẳng đường nhé';

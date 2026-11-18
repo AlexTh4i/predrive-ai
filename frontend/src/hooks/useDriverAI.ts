@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { RefObject } from 'react';
 import { DriverAnalyzer } from '../ai/driverAnalyzer';
-import type { AnalysisResult } from '../ai/driverAnalyzer';
+import type { AnalysisResult, AnalyzerThresholds } from '../ai/driverAnalyzer';
 
 export type AiStatus = 'idle' | 'loading' | 'ready' | 'error';
 
@@ -13,24 +13,40 @@ function isSame(a: AnalysisResult | null, b: AnalysisResult): boolean {
     a !== null &&
     a.state === b.state &&
     a.alertLevel === b.alertLevel &&
+    a.severityLevel === b.severityLevel &&
     a.faceVisible === b.faceVisible &&
     a.imageQuality === b.imageQuality
   );
 }
 
-export function useDriverAI(videoRef: RefObject<HTMLVideoElement | null>) {
+export function useDriverAI(
+  videoRef: RefObject<HTMLVideoElement | null>,
+  thresholds?: Partial<AnalyzerThresholds>,
+) {
   const analyzerRef = useRef<DriverAnalyzer | null>(null);
+  const thresholdsRef = useRef<Partial<AnalyzerThresholds> | undefined>(thresholds);
   const timerRef = useRef<number | null>(null);
   const [aiStatus, setAiStatus] = useState<AiStatus>('idle');
   const [aiError, setAiError] = useState<string | null>(null);
   const [result, setResult] = useState<AnalysisResult | null>(null);
+
+  useEffect(() => {
+    thresholdsRef.current = thresholds;
+    if (thresholds && analyzerRef.current) {
+      analyzerRef.current.updateThresholds(thresholds);
+    }
+  }, [thresholds]);
 
   const load = useCallback(async (): Promise<boolean> => {
     if (analyzerRef.current) return true;
     setAiStatus('loading');
     setAiError(null);
     try {
-      analyzerRef.current = await DriverAnalyzer.create();
+      const created = await DriverAnalyzer.create();
+      if (thresholdsRef.current) {
+        created.updateThresholds(thresholdsRef.current);
+      }
+      analyzerRef.current = created;
       setAiStatus('ready');
       return true;
     } catch (err) {

@@ -15,6 +15,9 @@ function fields(settings: SettingsData) {
     critical: String(settings.continuousCriticalSec / 60),
     rest: String(settings.restResetMin),
     shareLocation: settings.shareLocation,
+    level1Sec: String(settings.level1Sec ?? 1),
+    level2Sec: String(settings.level2Sec ?? 2),
+    level3Sec: String(settings.level3Sec ?? 4),
     hbRetention: String(settings.heartbeatRetentionDays ?? 30),
     locRetention: String(settings.locationRetentionDays ?? 90),
     evRetention: String(settings.eventRetentionDays ?? 365),
@@ -50,6 +53,9 @@ function SettingsForm({ initial }: { initial: SettingsData }) {
     const locRet = Math.max(1, Math.round(Number(draft.locRetention) || 90));
     const evRet = Math.max(1, Math.round(Number(draft.evRetention) || 365));
     const auditRet = Math.max(1, Math.round(Number(draft.auditRetention) || 730));
+    const lvl1 = Number(draft.level1Sec) || 1;
+    const lvl2 = Number(draft.level2Sec) || 2;
+    const lvl3 = Number(draft.level3Sec) || 4;
 
     const issue = [
       { field: 'warning', message: 'Nhập ngưỡng cảnh báo dương có thể quy đổi sang giây.', invalid: !Number.isSafeInteger(warning) || warning < 1 },
@@ -75,12 +81,25 @@ function SettingsForm({ initial }: { initial: SettingsData }) {
       draft.auditRetention !== baseSaved.auditRetention;
     const includeRetention = saved.heartbeatRetentionDays !== undefined || retentionModified;
 
+    const levelsModified =
+      draft.level1Sec !== baseSaved.level1Sec ||
+      draft.level2Sec !== baseSaved.level2Sec ||
+      draft.level3Sec !== baseSaved.level3Sec;
+    const includeLevels = saved.level1Sec !== undefined || levelsModified;
+
     const payload: SettingsData = {
       ...saved,
       continuousWarnSec: warning,
       continuousCriticalSec: critical,
       restResetMin: rest,
       shareLocation: draft.shareLocation,
+      ...(includeLevels
+        ? {
+            level1Sec: lvl1,
+            level2Sec: lvl2,
+            level3Sec: lvl3,
+          }
+        : {}),
       ...(includeRetention
         ? {
             heartbeatRetentionDays: hbRet,
@@ -126,6 +145,21 @@ function SettingsForm({ initial }: { initial: SettingsData }) {
           <AlertCircle size={16} aria-hidden />{validation.message}
         </p>}
         <p className="settings-hint"><Info size={16} aria-hidden /> Chu kỳ heartbeat của thiết bị hiện là {saved.heartbeatIntervalSec} giây.</p>
+      </fieldset>
+      <fieldset disabled={saving} className="card panel settings-panel" aria-label="Cảnh báo buồn ngủ 3 mức">
+        <SectionHeading title="Cảnh báo buồn ngủ 3 mức" description="Thời gian nhắm mắt để phát: Mức 1 nhắc nhẹ → Mức 2 chuông cabin → Mức 3 báo điều hành (áp dụng trực tiếp cho app không cần build lại)."
+          actions={<span className="icon-tile tone-amber"><AlertCircle size={19} aria-hidden /></span>} />
+        <div className="settings-fields">
+          <div><label htmlFor="lvl-1">Mức 1 — Nhắc nhẹ (giây)</label>
+            <input id="lvl-1" type="number" min={0.2} max={30} step="any" required value={draft.level1Sec}
+              onChange={(event) => update('level1Sec', event.target.value)} /></div>
+          <div><label htmlFor="lvl-2">Mức 2 — Chuông cabin (giây)</label>
+            <input id="lvl-2" type="number" min={0.5} max={60} step="any" required value={draft.level2Sec}
+              onChange={(event) => update('level2Sec', event.target.value)} /></div>
+          <div><label htmlFor="lvl-3">Mức 3 — Báo điều hành (giây)</label>
+            <input id="lvl-3" type="number" min={1} max={120} step="any" required value={draft.level3Sec}
+              onChange={(event) => update('level3Sec', event.target.value)} /></div>
+        </div>
       </fieldset>
       <fieldset disabled={saving} className="card panel settings-panel" aria-label="Chia sẻ vị trí">
         <SectionHeading title="Chia sẻ vị trí" description="Cấu hình cho phép app tài xế gửi vị trí trong phiên giám sát."

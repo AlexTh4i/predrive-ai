@@ -134,6 +134,14 @@ def event_to_schema(
     resolved_ack_by = ack_by_name
     if resolved_ack_by is None and ev.metrics:
         resolved_ack_by = ev.metrics.get("ack_by_name")
+    alert_action = (ev.metrics or {}).get("alert_action")
+    if not alert_action:
+        if ev.level >= 3:
+            alert_action = "notify_dispatcher"
+        elif ev.level == 2:
+            alert_action = "cabin_bell"
+        else:
+            alert_action = "gentle_reminder"
     return AlertEvent(
         id=ev.id,
         sessionId=ev.session_id,
@@ -143,6 +151,7 @@ def event_to_schema(
         type=ev.type,  # type: ignore[arg-type]
         level=ev.level_str,  # type: ignore[arg-type]
         severityLevel=int(ev.level),
+        alertAction=alert_action,
         status=ev.status,  # type: ignore[arg-type]
         state=ev.state,  # type: ignore[arg-type]
         riskScore=ev.risk_score,

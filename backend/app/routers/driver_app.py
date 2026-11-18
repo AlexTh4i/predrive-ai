@@ -35,6 +35,7 @@ from ..schemas.m3 import (
     LocationIngestResponse,
     LocationInputPoint,
     SessionSchema,
+    SettingsSchema,
     UpsertEventRequest,
 )
 from ..services.events_service import _resolve_event_uuid, upsert_session_event
@@ -98,6 +99,16 @@ def _get_owned_session(
             "Tài xế không có quyền truy cập phiên của người khác",
         )
     return sess
+
+
+@router.get("/config", response_model=SettingsSchema)
+def get_driver_runtime_config(
+    current_user: User = Depends(require_roles("driver")),
+    db: Session = Depends(get_db),
+) -> SettingsSchema:
+    org_id = get_jwt_org_id(current_user)
+    org_settings = get_or_create_org_settings(db, org_id)
+    return settings_to_schema(org_settings)
 
 
 @router.post("", response_model=CreateSessionResponse)
@@ -351,6 +362,7 @@ def post_session_heartbeat(
         status="ok",
         state=sess.current_state,  # type: ignore[arg-type]
         receivedAt=now,
+        settings=settings_to_schema(org_settings),
     )
 
 

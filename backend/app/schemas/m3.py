@@ -229,6 +229,7 @@ class HeartbeatResponse(CamelModel):
     status: str = "ok"
     state: ContractState
     receivedAt: UtcDatetime
+    settings: Optional[SettingsSchema] = None
 
 
 class EndSessionSummary(CamelModel):
@@ -300,6 +301,7 @@ class AlertEvent(CamelModel):
     type: EventType
     level: EventLevel
     severityLevel: Optional[int] = None
+    alertAction: Optional[str] = None
     status: EventStatus
     state: ContractState
     riskScore: Optional[float] = None
