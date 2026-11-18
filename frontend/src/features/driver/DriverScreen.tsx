@@ -36,6 +36,7 @@ export function DriverScreen() {
     syncStatus,
     syncError,
     settings,
+    restReminder,
     saveAndTestServer,
     login,
     pairVehicle,
@@ -216,6 +217,15 @@ export function DriverScreen() {
         : 'Chưa thấy rõ khuôn mặt trong khung hình';
     bannerSub = 'Hãy chỉnh lại góc điện thoại hoặc ánh sáng';
     bannerColor = '#8A8F93';
+  } else if (isMonitoring && restReminder?.shouldRest) {
+    const topStop = restReminder.suggestedStops[0];
+    bannerTitle = restReminder.overMaxLimit
+      ? `Quá hạn giờ lái liên tục (${restReminder.continuousDrivingMin} phút)`
+      : `Sắp chạm giới hạn lái liên tục (còn ${restReminder.remainingMin} phút)`;
+    bannerSub = topStop
+      ? `Gợi ý dừng nghỉ ${restReminder.minRestMin}p tại: ${topStop.name} (${topStop.distanceKm} km)`
+      : `Hãy dừng nghỉ tối thiểu ${restReminder.minRestMin} phút`;
+    bannerColor = restReminder.overMaxLimit ? '#E5372B' : '#F5A623';
   }
 
   return (

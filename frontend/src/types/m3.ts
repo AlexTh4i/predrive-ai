@@ -160,11 +160,33 @@ export interface HeartbeatRequest {
   location?: HeartbeatLocation | null;
 }
 
+export interface NearestRestStopItem {
+  id: string;
+  name: string;
+  stopType: string;
+  lat: number;
+  lng: number;
+  distanceKm: number;
+  open24h?: boolean;
+  hasTruckParking?: boolean;
+}
+
+export interface RestReminderPayload {
+  shouldRest: boolean;
+  overMaxLimit: boolean;
+  continuousDrivingMin: number;
+  maxContinuousDriveMin: number;
+  minRestMin: number;
+  remainingMin: number;
+  suggestedStops: NearestRestStopItem[];
+}
+
 export interface HeartbeatResponse {
   status: string;
   state: ContractState;
   receivedAt: string;
   settings?: DriverSettings;
+  restReminder?: RestReminderPayload | null;
 }
 
 export interface EndSessionRequest {

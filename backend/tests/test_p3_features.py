@@ -461,3 +461,153 @@ def test_p3_5_auto_escalation_levels_recipients_timing_ack_stop_and_no_duplicate
             ]
             assert len(esc_ev2) == 3
             assert [e.channel for e in esc_ev2] == ["push", "push", "sms"]
+
+
+def test_p3_2_continuous_driving_rest_breaks_and_nearest_rest_stops_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from app.services.sse import sse_broker
+
+    app = _setup_test_app(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        mgr = client.post(
+            "/api/v1/auth/login", json={"username": "manager", "password": "manager123"}
+        ).json()
+        mgr_token = mgr["accessToken"]
+        org_id = mgr["user"]["organizationId"]
+
+        drv = client.post(
+            "/api/v1/auth/login", json={"username": "driver1", "password": "driver123"}
+        ).json()
+        drv_token = drv["accessToken"]
+
+        # Set maxContinuousDriveMin = 120, restReminderBeforeMin = 15, restResetMin (min_rest_min) = 20, shareLocation = True
+        cur_settings = client.get("/api/v1/settings", headers=_auth(mgr_token)).json()
+        cur_settings["maxContinuousDriveMin"] = 120
+        cur_settings["restReminderBeforeMin"] = 15
+        cur_settings["restResetMin"] = 20
+        cur_settings["shareLocation"] = True
+        assert (
+            client.put("/api/v1/settings", json=cur_settings, headers=_auth(mgr_token)).status_code
+            == 200
+        )
+
+        client.post(
+            "/api/v1/auth/consent",
+            json={"version": "2026-01", "locationConsent": True, "clipStorageConsent": False},
+            headers=_auth(drv_token),
+        )
+
+        # Verify /rest-stops/nearest returns stops strictly sorted by distanceKm ascending
+        stops_res = client.get(
+            "/api/v1/rest-stops/nearest?lat=20.05&lng=106.04&limit=5",
+            headers=_auth(drv_token),
+        )
+        assert stops_res.status_code == 200
+        stops = stops_res.json()
+        assert len(stops) == 5
+        distances = [s["distanceKm"] for s in stops]
+        assert distances == sorted(distances)
+        assert distances[0] < distances[-1]
+
+        t0 = datetime.now(timezone.utc) - timedelta(hours=3)
+        sess_id = str(uuid4())
+        client.post(
+            "/api/v1/sessions",
+            json={"sessionId": sess_id, "startedAt": t0.isoformat()},
+            headers=_auth(drv_token),
+        )
+
+        # 1) At 104 min (6240s < 105 min = (120 - 15) * 60 = 6300s): NO rest reminder yet!
+        hb_104 = client.post(
+            f"/api/v1/sessions/{sess_id}/heartbeat",
+            json={
+                "state": "NORMAL",
+                "imageQuality": "GOOD",
+                "continuousDrivingSec": 104 * 60,
+                "vehicleMoving": True,
+                "capturedAt": (t0 + timedelta(minutes=104)).isoformat(),
+                "location": {"lat": 20.05, "lng": 106.04},
+            },
+            headers=_auth(drv_token),
+        )
+        assert hb_104.status_code == 200
+        assert hb_104.json()["restReminder"] is None
+
+        # 2) At exact 105 min (6300s == (120 - 15) * 60): restReminder fires with sorted suggestedStops + LONG_DRIVING SSE alert!
+        sse_broker.clear_history(org_id)
+        hb_105 = client.post(
+            f"/api/v1/sessions/{sess_id}/heartbeat",
+            json={
+                "state": "NORMAL",
+                "imageQuality": "GOOD",
+                "continuousDrivingSec": 105 * 60,
+                "vehicleMoving": True,
+                "capturedAt": (t0 + timedelta(minutes=105)).isoformat(),
+                "location": {"lat": 20.05, "lng": 106.04},
+            },
+            headers=_auth(drv_token),
+        )
+        assert hb_105.status_code == 200
+        rem = hb_105.json()["restReminder"]
+        assert rem is not None
+        assert rem["shouldRest"] is True
+        assert rem["overMaxLimit"] is False
+        assert rem["remainingMin"] == 15
+        rem_dists = [s["distanceKm"] for s in rem["suggestedStops"]]
+        assert rem_dists == sorted(rem_dists)
+        assert [s["id"] for s in rem["suggestedStops"]] == [s["id"] for s in stops]
+        assert any(
+            m["event"] == "alert" and '"LONG_DRIVING"' in m["data"]
+            for m in sse_broker.get_recent_messages(org_id)
+        )
+
+        # 3) Short rest break (10 min < minRestMin=20 min) -> rejected (qualifiedReset=False) + REST_CLAIM_REJECTED event
+        rb1_start = t0 + timedelta(minutes=106)
+        rb1_res = client.post(
+            f"/api/v1/sessions/{sess_id}/rest-breaks/start",
+            json={"startedAt": rb1_start.isoformat(), "lat": 20.05, "lng": 106.04},
+            headers=_auth(drv_token),
+        )
+        assert rb1_res.status_code == 201
+        assert rb1_res.json()["suggestedStopId"] == stops[0]["id"]
+
+        rb1_end_res = client.post(
+            f"/api/v1/sessions/{sess_id}/rest-breaks/end",
+            json={"endedAt": (rb1_start + timedelta(minutes=10)).isoformat()},
+            headers=_auth(drv_token),
+        )
+        assert rb1_end_res.status_code == 200
+        assert rb1_end_res.json()["qualifiedReset"] is False
+
+        # 4) Full rest break (25 min >= minRestMin=20 min) -> qualifiedReset=True, resets continuous driving!
+        rb2_start = t0 + timedelta(minutes=117)
+        rb2_end = rb2_start + timedelta(minutes=25)
+        client.post(
+            f"/api/v1/sessions/{sess_id}/rest-breaks/start",
+            json={"startedAt": rb2_start.isoformat(), "suggestedStopId": stops[0]["id"]},
+            headers=_auth(drv_token),
+        )
+        rb2_end_res = client.post(
+            f"/api/v1/sessions/{sess_id}/rest-breaks/end",
+            json={"endedAt": rb2_end.isoformat()},
+            headers=_auth(drv_token),
+        )
+        assert rb2_end_res.status_code == 200
+        assert rb2_end_res.json()["qualifiedReset"] is True
+
+        # Heartbeat 10 minutes after qualifying rest -> continuous_driving_sec is ~10m, so restReminder is None!
+        hb_after_rest = client.post(
+            f"/api/v1/sessions/{sess_id}/heartbeat",
+            json={
+                "state": "NORMAL",
+                "imageQuality": "GOOD",
+                "continuousDrivingSec": 152 * 60,
+                "vehicleMoving": True,
+                "capturedAt": (rb2_end + timedelta(minutes=10)).isoformat(),
+                "location": {"lat": 20.05, "lng": 106.04},
+            },
+            headers=_auth(drv_token),
+        )
+        assert hb_after_rest.status_code == 200
+        assert hb_after_rest.json()["restReminder"] is None

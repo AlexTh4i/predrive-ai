@@ -14,13 +14,17 @@ from sqlalchemy.orm import Session
 from ..core.database import get_db
 from ..core.errors import AppError
 from ..core.security import bearer_scheme, get_current_user, get_jwt_org_id, require_roles
+from uuid import uuid4
 from ..models.models import (
     Consent,
     EventModel,
     HeartbeatModel,
     LocationModel,
+    RestBreak,
+    RestStop,
     SessionModel,
     User,
+    Vehicle,
 )
 from ..schemas.m3 import (
     AlertEvent,
@@ -34,6 +38,9 @@ from ..schemas.m3 import (
     LocationIngestRequest,
     LocationIngestResponse,
     LocationInputPoint,
+    RestBreakEndRequest,
+    RestBreakItem,
+    RestBreakStartRequest,
     SessionSchema,
     SettingsSchema,
     UpsertEventRequest,
@@ -42,11 +49,17 @@ from ..services.events_service import _resolve_event_uuid, upsert_session_event
 from ..services.mappers import (
     build_live_driver_state,
     ensure_utc,
+    event_to_schema,
     get_or_create_org_settings,
     session_to_schema,
     settings_to_schema,
 )
 from ..services.observability import HEARTBEATS_RECEIVED_TOTAL
+from ..services.rest_service import (
+    compute_effective_continuous_sec,
+    evaluate_driving_hours_and_rest_reminder,
+    find_nearest_rest_stops,
+)
 from ..services.sse import sse_broker
 from ..services.rate_limiter import enforce_events_rate_limit, enforce_heartbeat_rate_limit
 
@@ -324,12 +337,17 @@ def post_session_heartbeat(
             sess.status = "active"
 
     sess.current_state = payload.state
-    sess.continuous_driving_sec = payload.continuousDrivingSec
+    eff_cont_sec, last_rest_end = compute_effective_continuous_sec(
+        db, sess, org_settings, payload.continuousDrivingSec, captured_utc
+    )
+    sess.continuous_driving_sec = eff_cont_sec
     if payload.continuousDrivingSec > sess.total_driving_sec:
         sess.total_driving_sec = payload.continuousDrivingSec
     sess.last_heartbeat_at = now
 
     # Store optional location ONLY when BOTH org settings AND driver consent allow location
+    loc_lat = payload.location.lat if (allow_loc and payload.location) else None
+    loc_lng = payload.location.lng if (allow_loc and payload.location) else None
     if allow_loc and payload.location is not None:
         loc_at = ensure_utc(payload.location.at) if payload.location.at else captured_utc
         db.add(
@@ -345,6 +363,18 @@ def post_session_heartbeat(
                 ts=loc_at or now,
             )
         )
+
+    rest_reminder = evaluate_driving_hours_and_rest_reminder(
+        db=db,
+        sess=sess,
+        driver=current_user,
+        org_settings=org_settings,
+        continuous_sec=eff_cont_sec,
+        last_rest_end=last_rest_end,
+        lat=loc_lat,
+        lng=loc_lng,
+        now_utc=captured_utc,
+    )
 
     db.commit()
     db.refresh(sess)
@@ -363,6 +393,177 @@ def post_session_heartbeat(
         state=sess.current_state,  # type: ignore[arg-type]
         receivedAt=now,
         settings=settings_to_schema(org_settings),
+        restReminder=rest_reminder,
+    )
+
+
+@router.post("/{id}/rest-breaks/start", response_model=RestBreakItem, status_code=status.HTTP_201_CREATED)
+def start_rest_break(
+    id: str,
+    payload: RestBreakStartRequest = Body(default=RestBreakStartRequest()),
+    current_user: User = Depends(require_roles("driver")),
+    db: Session = Depends(get_db),
+) -> RestBreakItem:
+    _require_driver_consent(db, current_user)
+    sess = _get_owned_session(db, id, current_user)
+    org_id = get_jwt_org_id(current_user)
+    org_settings = get_or_create_org_settings(db, org_id)
+    now = ensure_utc(payload.startedAt) or datetime.now(timezone.utc)
+
+    active_rb = db.scalar(
+        select(RestBreak)
+        .where(
+            RestBreak.organization_id == org_id,
+            RestBreak.driver_id == current_user.id,
+            RestBreak.session_id == sess.id,
+            RestBreak.ended_at.is_(None),
+        )
+        .order_by(RestBreak.started_at.desc())
+    )
+    if active_rb is not None:
+        return RestBreakItem(
+            id=active_rb.id,
+            sessionId=active_rb.session_id,
+            driverId=active_rb.driver_id,
+            driveMinBefore=active_rb.drive_min_before,
+            suggestedStopId=active_rb.suggested_stop_id,
+            startedAt=ensure_utc(active_rb.started_at),  # type: ignore[arg-type]
+            endedAt=None,
+        )
+
+    eff_cont_sec, _ = compute_effective_continuous_sec(
+        db, sess, org_settings, sess.continuous_driving_sec, now
+    )
+    drive_min_before = max(0, round(eff_cont_sec / 60))
+
+    stop_id: Optional[str] = payload.suggestedStopId
+    if stop_id:
+        st = db.get(RestStop, stop_id)
+        if st is None or (st.organization_id is not None and st.organization_id != org_id):
+            stop_id = None
+    elif payload.lat is not None and payload.lng is not None:
+        nearest = find_nearest_rest_stops(db, org_id, payload.lat, payload.lng, limit=1)
+        if nearest:
+            stop_id = nearest[0].id
+
+    rb = RestBreak(
+        organization_id=org_id,
+        driver_id=current_user.id,
+        session_id=sess.id,
+        drive_min_before=drive_min_before,
+        reminder_sent_at=now,
+        suggested_stop_id=stop_id,
+        started_at=now,
+        ended_at=None,
+    )
+    db.add(rb)
+    db.commit()
+    db.refresh(rb)
+
+    return RestBreakItem(
+        id=rb.id,
+        sessionId=rb.session_id,
+        driverId=rb.driver_id,
+        driveMinBefore=rb.drive_min_before,
+        suggestedStopId=rb.suggested_stop_id,
+        startedAt=ensure_utc(rb.started_at),  # type: ignore[arg-type]
+        endedAt=None,
+    )
+
+
+@router.post("/{id}/rest-breaks/end", response_model=RestBreakItem)
+def end_rest_break(
+    id: str,
+    payload: RestBreakEndRequest = Body(default=RestBreakEndRequest()),
+    current_user: User = Depends(require_roles("driver")),
+    db: Session = Depends(get_db),
+) -> RestBreakItem:
+    _require_driver_consent(db, current_user)
+    sess = _get_owned_session(db, id, current_user)
+    org_id = get_jwt_org_id(current_user)
+    org_settings = get_or_create_org_settings(db, org_id)
+    now = ensure_utc(payload.endedAt) or datetime.now(timezone.utc)
+
+    rb = db.scalar(
+        select(RestBreak)
+        .where(
+            RestBreak.organization_id == org_id,
+            RestBreak.driver_id == current_user.id,
+            RestBreak.session_id == sess.id,
+            RestBreak.ended_at.is_(None),
+        )
+        .order_by(RestBreak.started_at.desc())
+    )
+    if rb is None:
+        raise AppError(
+            status.HTTP_404_NOT_FOUND,
+            "REST_BREAK_NOT_FOUND",
+            "Không có kỳ nghỉ đang mở trong phiên này",
+        )
+
+    rb_start = ensure_utc(rb.started_at) or now
+    rested_sec = max(0.0, (now - rb_start).total_seconds())
+    rb.ended_at = now
+    qualified = rested_sec >= float(org_settings.min_rest_min) * 60.0
+
+    if sess.ended_at is None:
+        sess.status = "active"
+
+    if qualified:
+        sess.continuous_driving_sec = 0
+    else:
+        ev_id = str(uuid4())
+        ev = EventModel(
+            id=ev_id,
+            organization_id=org_id,
+            session_id=sess.id,
+            driver_id=current_user.id,
+            vehicle_id=sess.vehicle_id or current_user.vehicle_id,
+            client_event_id=f"rest-rej-{rb.id}",
+            type="REST_CLAIM_REJECTED",
+            level=2,
+            status="OPEN",
+            delayed=False,
+            occurred_at=now,
+            note=f"Nghỉ {round(rested_sec / 60.0, 1)} phút < tối thiểu {org_settings.min_rest_min} phút",
+            created_at=now,
+            metrics={
+                "api_level": "WARNING",
+                "alert_action": "notify_dispatcher",
+                "state": sess.current_state,
+                "duration_sec": int(rested_sec),
+                "captured_at": now.isoformat(),
+            },
+        )
+        db.add(ev)
+        sess.warning_count += 1
+        db.flush()
+
+        v_name = "Chưa phân xe"
+        v_id = sess.vehicle_id or current_user.vehicle_id
+        if v_id:
+            v_obj = db.get(Vehicle, v_id)
+            if v_obj:
+                v_name = v_obj.name
+        sse_broker.publish(
+            org_id,
+            "alert",
+            event_to_schema(ev, current_user.full_name, v_name).model_dump(mode="json"),
+        )
+
+    db.commit()
+    db.refresh(rb)
+
+    return RestBreakItem(
+        id=rb.id,
+        sessionId=rb.session_id,
+        driverId=rb.driver_id,
+        driveMinBefore=rb.drive_min_before,
+        suggestedStopId=rb.suggested_stop_id,
+        startedAt=rb_start,
+        endedAt=now,
+        restedMin=round(rested_sec / 60.0, 1),
+        qualifiedReset=qualified,
     )
 
 
