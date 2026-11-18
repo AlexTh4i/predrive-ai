@@ -14,15 +14,20 @@ from sqlalchemy.orm import Session
 from ..core.database import get_db
 from ..core.errors import AppError
 from ..core.security import (
+    generate_opaque_token,
     get_current_user,
     get_current_user_sse,
     hash_password,
+    hash_token,
     require_roles,
 )
 from ..models.models import (
+    ApiKey,
+    AuditLog,
     EventModel,
     HeartbeatModel,
     Pairing,
+    ReportModel,
     SessionModel,
     User,
     Vehicle,
@@ -30,6 +35,10 @@ from ..models.models import (
 from ..schemas.m3 import (
     AckEventRequest,
     AlertEvent,
+    ApiKeyCreatedResponse,
+    ApiKeyItem,
+    AuditLogItem,
+    CreateApiKeyRequest,
     CreateDriverRequest,
     CreatePairingCodeRequest,
     DriverDetailResponse,
@@ -38,14 +47,18 @@ from ..schemas.m3 import (
     DriverStatsResponse,
     EventLevel,
     EventType,
+    ExportReportRequest,
     HourlyBreakdownItem,
     HourlyCountItem,
     LiveDriverState,
+    PaginatedAuditLogsResponse,
     PaginatedEventsResponse,
     PairingCodeResponse,
+    ReportItem,
     SettingsSchema,
     SystemHealthResponse,
 )
+from ..services.audit import record_audit_log
 from ..services.mappers import (
     build_live_driver_state,
     driver_to_schema,
@@ -259,6 +272,7 @@ def list_events(
 @router.post("/events/{id}/ack", response_model=AlertEvent)
 def acknowledge_event(
     id: str,
+    request: Request,
     payload: AckEventRequest = Body(default=AckEventRequest()),
     current_user: User = Depends(require_roles("manager", "dispatcher")),
     db: Session = Depends(get_db),
@@ -278,6 +292,16 @@ def acknowledge_event(
     m = dict(ev.metrics or {})
     m["ack_by_name"] = current_user.full_name
     ev.metrics = m
+    record_audit_log(
+        db,
+        organization_id=current_user.organization_id,
+        actor_id=current_user.id,
+        action="ack_event",
+        entity="event",
+        entity_id=ev.id,
+        request=request,
+        meta={"note": payload.note or ""},
+    )
     db.commit()
     db.refresh(ev)
 
@@ -597,6 +621,7 @@ def get_settings(
 @router.put("/settings", response_model=SettingsSchema)
 def update_settings(
     payload: SettingsSchema,
+    request: Request,
     current_user: User = Depends(require_roles("manager")),
     db: Session = Depends(get_db),
 ) -> SettingsSchema:
@@ -614,6 +639,16 @@ def update_settings(
     org_settings.share_location = payload.shareLocation
     org_settings.heartbeat_interval_sec = payload.heartbeatIntervalSec
     org_settings.updated_at = datetime.now(timezone.utc)
+    record_audit_log(
+        db,
+        organization_id=current_user.organization_id,
+        actor_id=current_user.id,
+        action="update_settings",
+        entity="settings",
+        entity_id=current_user.organization_id,
+        request=request,
+        meta=payload.model_dump(mode="json"),
+    )
     db.commit()
     db.refresh(org_settings)
 
@@ -623,6 +658,7 @@ def update_settings(
 # --- PAIRING CODES & DRIVER CREATION (MANAGER ONLY) ---
 @router.post("/pairing-codes", response_model=PairingCodeResponse)
 def create_pairing_code(
+    request: Request,
     payload: CreatePairingCodeRequest = Body(default=CreatePairingCodeRequest()),
     current_user: User = Depends(require_roles("manager")),
     db: Session = Depends(get_db),
@@ -665,6 +701,17 @@ def create_pairing_code(
         created_at=now,
     )
     db.add(pairing)
+    db.flush()
+    record_audit_log(
+        db,
+        organization_id=org_id,
+        actor_id=current_user.id,
+        action="create_pairing",
+        entity="pairing",
+        entity_id=pairing.id,
+        request=request,
+        meta={"code": code, "vehicleId": veh_id},
+    )
     db.commit()
     db.refresh(pairing)
 
@@ -674,6 +721,7 @@ def create_pairing_code(
 @router.post("/drivers", response_model=DriverSchema, status_code=status.HTTP_201_CREATED)
 def create_driver_account(
     payload: CreateDriverRequest,
+    request: Request,
     current_user: User = Depends(require_roles("manager")),
     db: Session = Depends(get_db),
 ) -> DriverSchema:
@@ -729,6 +777,17 @@ def create_driver_account(
         must_change_password=True,
     )
     db.add(driver)
+    db.flush()
+    record_audit_log(
+        db,
+        organization_id=org_id,
+        actor_id=current_user.id,
+        action="create_driver",
+        entity="user",
+        entity_id=driver.id,
+        request=request,
+        meta={"username": username, "fullName": driver.full_name},
+    )
     db.commit()
     db.refresh(driver)
 
@@ -737,3 +796,227 @@ def create_driver_account(
     if generated_temp:
         out.temporaryPassword = raw_password
     return out
+
+
+# --- AUDIT LOGS, API KEYS & REPORTS (MANAGER ONLY - P1-4 / P3-6 / P3-8) ---
+@router.get("/audit-logs", response_model=PaginatedAuditLogsResponse)
+def list_audit_logs(
+    action: Optional[str] = Query(default=None),
+    entity: Optional[str] = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    pageSize: int = Query(default=20, ge=1, le=200),
+    current_user: User = Depends(require_roles("manager")),
+    db: Session = Depends(get_db),
+) -> PaginatedAuditLogsResponse:
+    org_id = current_user.organization_id
+    filters = [AuditLog.organization_id == org_id]
+    if action:
+        filters.append(AuditLog.action == action)
+    if entity:
+        filters.append(AuditLog.entity == entity)
+
+    total = int(db.scalar(select(func.count(AuditLog.id)).where(*filters)) or 0)
+    rows = db.scalars(
+        select(AuditLog)
+        .where(*filters)
+        .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
+        .offset((page - 1) * pageSize)
+        .limit(pageSize)
+    ).all()
+
+    users = db.scalars(select(User).where(User.organization_id == org_id)).all()
+    user_map = {u.id: u.full_name for u in users}
+
+    items = [
+        AuditLogItem(
+            id=r.id,
+            organizationId=r.organization_id,
+            actorId=r.actor_id,
+            actorName=user_map.get(r.actor_id) if r.actor_id else None,
+            action=r.action,
+            entity=r.entity,
+            entityId=r.entity_id,
+            ip=r.ip,
+            meta=r.meta or {},
+            createdAt=ensure_utc(r.created_at),  # type: ignore[arg-type]
+        )
+        for r in rows
+    ]
+    return PaginatedAuditLogsResponse(items=items, total=total)
+
+
+@router.get("/api-keys", response_model=list[ApiKeyItem])
+def list_api_keys(
+    current_user: User = Depends(require_roles("manager")),
+    db: Session = Depends(get_db),
+) -> list[ApiKeyItem]:
+    rows = db.scalars(
+        select(ApiKey)
+        .where(ApiKey.organization_id == current_user.organization_id)
+        .order_by(ApiKey.created_at.desc())
+    ).all()
+    return [
+        ApiKeyItem(
+            id=k.id,
+            name=k.name,
+            keyPrefix=k.key_prefix,
+            scopes=list(k.scopes or []),
+            lastUsedAt=ensure_utc(k.last_used_at),
+            revokedAt=ensure_utc(k.revoked_at),
+            createdAt=ensure_utc(k.created_at),  # type: ignore[arg-type]
+        )
+        for k in rows
+    ]
+
+
+@router.post("/api-keys", response_model=ApiKeyCreatedResponse, status_code=status.HTTP_201_CREATED)
+def create_api_key(
+    payload: CreateApiKeyRequest,
+    request: Request,
+    current_user: User = Depends(require_roles("manager")),
+    db: Session = Depends(get_db),
+) -> ApiKeyCreatedResponse:
+    org_id = current_user.organization_id
+    raw_secret = generate_opaque_token()
+    raw_key = f"pd_live_{raw_secret}"
+    prefix = raw_key[:14]
+    now = datetime.now(timezone.utc)
+
+    row = ApiKey(
+        organization_id=org_id,
+        name=payload.name.strip(),
+        key_prefix=prefix,
+        key_hash=hash_token(raw_key),
+        scopes=list(payload.scopes),
+        created_at=now,
+    )
+    db.add(row)
+    db.flush()
+    record_audit_log(
+        db,
+        organization_id=org_id,
+        actor_id=current_user.id,
+        action="create_api_key",
+        entity="api_key",
+        entity_id=row.id,
+        request=request,
+        meta={"name": row.name, "scopes": list(row.scopes)},
+    )
+    db.commit()
+    db.refresh(row)
+
+    return ApiKeyCreatedResponse(
+        id=row.id,
+        name=row.name,
+        keyPrefix=row.key_prefix,
+        scopes=list(row.scopes),
+        lastUsedAt=None,
+        revokedAt=None,
+        createdAt=ensure_utc(row.created_at),  # type: ignore[arg-type]
+        rawKey=raw_key,
+    )
+
+
+@router.delete("/api-keys/{id}", response_model=ApiKeyItem)
+def revoke_api_key(
+    id: str,
+    request: Request,
+    current_user: User = Depends(require_roles("manager")),
+    db: Session = Depends(get_db),
+) -> ApiKeyItem:
+    row = db.get(ApiKey, id)
+    if row is None or row.organization_id != current_user.organization_id:
+        raise AppError(
+            status.HTTP_404_NOT_FOUND,
+            "API_KEY_NOT_FOUND",
+            "Không tìm thấy API key trong tổ chức",
+        )
+    now = datetime.now(timezone.utc)
+    if row.revoked_at is None:
+        row.revoked_at = now
+    record_audit_log(
+        db,
+        organization_id=current_user.organization_id,
+        actor_id=current_user.id,
+        action="revoke_api_key",
+        entity="api_key",
+        entity_id=row.id,
+        request=request,
+        meta={"name": row.name},
+    )
+    db.commit()
+    db.refresh(row)
+
+    return ApiKeyItem(
+        id=row.id,
+        name=row.name,
+        keyPrefix=row.key_prefix,
+        scopes=list(row.scopes or []),
+        lastUsedAt=ensure_utc(row.last_used_at),
+        revokedAt=ensure_utc(row.revoked_at),
+        createdAt=ensure_utc(row.created_at),  # type: ignore[arg-type]
+    )
+
+
+@router.post("/reports/export", response_model=ReportItem, status_code=status.HTTP_201_CREATED)
+def export_report_endpoint(
+    request: Request,
+    payload: ExportReportRequest = Body(default=ExportReportRequest()),
+    current_user: User = Depends(require_roles("manager")),
+    db: Session = Depends(get_db),
+) -> ReportItem:
+    from datetime import date
+
+    org_id = current_user.organization_id
+    today = to_vn_time(datetime.now(timezone.utc)).date()
+    p_end = date.fromisoformat(payload.periodEnd) if payload.periodEnd else today
+    days_span = 6 if payload.reportType == "weekly" else 29
+    p_start = (
+        date.fromisoformat(payload.periodStart)
+        if payload.periodStart
+        else (p_end - timedelta(days=days_span))
+    )
+
+    rep_id = str(uuid4())
+    storage_path = f"reports/{org_id}/{rep_id}.{payload.fileFormat}"
+    rep = ReportModel(
+        id=rep_id,
+        organization_id=org_id,
+        report_type=payload.reportType,
+        file_format=payload.fileFormat,
+        period_start=p_start,
+        period_end=p_end,
+        status="ready",
+        storage_path=storage_path,
+        created_by=current_user.id,
+    )
+    db.add(rep)
+    db.flush()
+    record_audit_log(
+        db,
+        organization_id=org_id,
+        actor_id=current_user.id,
+        action="export_report",
+        entity="report",
+        entity_id=rep.id,
+        request=request,
+        meta={
+            "reportType": payload.reportType,
+            "fileFormat": payload.fileFormat,
+            "periodStart": p_start.isoformat(),
+            "periodEnd": p_end.isoformat(),
+        },
+    )
+    db.commit()
+    db.refresh(rep)
+
+    return ReportItem(
+        id=rep.id,
+        reportType=rep.report_type,  # type: ignore[arg-type]
+        fileFormat=rep.file_format,  # type: ignore[arg-type]
+        periodStart=rep.period_start.isoformat(),
+        periodEnd=rep.period_end.isoformat(),
+        status=rep.status,  # type: ignore[arg-type]
+        storagePath=rep.storage_path,
+        createdAt=ensure_utc(rep.created_at),  # type: ignore[arg-type]
+    )

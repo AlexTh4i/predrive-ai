@@ -335,3 +335,132 @@ def test_p1_3_rate_limiting_login_pair_events_heartbeat_429_retry_after(
     rate_limiter.reset()
 
 
+def test_p1_4_audit_logs_exact_one_row_per_action_and_manager_pagination(
+    p1_client: TestClient,
+):
+    from sqlalchemy import delete
+    from app.models.models import AuditLog
+
+    # Clear seed audit logs so we count exact 1 row per action
+    with db_mod.SessionLocal() as db:
+        db.execute(delete(AuditLog))
+        db.commit()
+
+    # 1. login_failed (1)
+    assert (
+        p1_client.post(
+            "/api/v1/auth/login",
+            json={"username": "manager", "password": "wrong_password"},
+        ).status_code
+        == 401
+    )
+
+    # 2. login_success (1)
+    mgr_login = p1_client.post(
+        "/api/v1/auth/login",
+        json={"username": "manager", "password": "manager123"},
+    )
+    assert mgr_login.status_code == 200
+    mgr_hdr = {"Authorization": f"Bearer {mgr_login.json()['accessToken']}"}
+
+    # 3. ack_event (1)
+    ev_page = p1_client.get("/api/v1/events?acked=false&pageSize=1", headers=mgr_hdr).json()
+    ev_id = ev_page["items"][0]["id"]
+    assert (
+        p1_client.post(
+            f"/api/v1/events/{ev_id}/ack",
+            json={"note": "Kiểm tra audit ack"},
+            headers=mgr_hdr,
+        ).status_code
+        == 200
+    )
+
+    # 4. update_settings (1)
+    assert (
+        p1_client.put(
+            "/api/v1/settings",
+            json={
+                "continuousWarnSec": 7200,
+                "continuousCriticalSec": 10800,
+                "restResetMin": 20,
+                "shareLocation": True,
+                "heartbeatIntervalSec": 30,
+            },
+            headers=mgr_hdr,
+        ).status_code
+        == 200
+    )
+
+    # 5. create_driver (1)
+    assert (
+        p1_client.post(
+            "/api/v1/drivers",
+            json={"fullName": "Lê Audit", "phone": "0912345999", "username": "drv_audit"},
+            headers=mgr_hdr,
+        ).status_code
+        == 201
+    )
+
+    # 6. create_pairing (1)
+    assert (
+        p1_client.post(
+            "/api/v1/pairing-codes",
+            json={"expiresInMinutes": 60},
+            headers=mgr_hdr,
+        ).status_code
+        == 200
+    )
+
+    # 7 & 8. create_api_key (1) & revoke_api_key (1)
+    ak_res = p1_client.post(
+        "/api/v1/api-keys",
+        json={"name": "ERP Key", "scopes": ["events:read"]},
+        headers=mgr_hdr,
+    )
+    assert ak_res.status_code == 201
+    ak_id = ak_res.json()["id"]
+    assert p1_client.delete(f"/api/v1/api-keys/{ak_id}", headers=mgr_hdr).status_code == 200
+
+    # 9. export_report (1)
+    rep_res = p1_client.post(
+        "/api/v1/reports/export",
+        json={"reportType": "weekly", "fileFormat": "pdf"},
+        headers=mgr_hdr,
+    )
+    assert rep_res.status_code == 201
+
+    # Verify paginated API for manager (9 actions total, exact 1 per action!)
+    page1 = p1_client.get("/api/v1/audit-logs?page=1&pageSize=5", headers=mgr_hdr)
+    assert page1.status_code == 200
+    p1_data = page1.json()
+    assert p1_data["total"] == 9
+    assert len(p1_data["items"]) == 5
+
+    page2 = p1_client.get("/api/v1/audit-logs?page=2&pageSize=5", headers=mgr_hdr).json()
+    assert len(page2["items"]) == 4
+
+    all_actions = [x["action"] for x in p1_data["items"] + page2["items"]]
+    expected_actions = [
+        "login_failed",
+        "login_success",
+        "ack_event",
+        "update_settings",
+        "create_driver",
+        "create_pairing",
+        "create_api_key",
+        "revoke_api_key",
+        "export_report",
+    ]
+    for act in expected_actions:
+        assert all_actions.count(act) == 1, f"Expected exact 1 audit row for {act}, got {all_actions.count(act)}"
+
+    # Dispatcher MUST be forbidden from reading audit logs
+    disp_login = p1_client.post(
+        "/api/v1/auth/login",
+        json={"username": "dispatcher", "password": "dispatcher123"},
+    ).json()
+    disp_hdr = {"Authorization": f"Bearer {disp_login['accessToken']}"}
+    assert p1_client.get("/api/v1/audit-logs", headers=disp_hdr).status_code == 403
+
+
+

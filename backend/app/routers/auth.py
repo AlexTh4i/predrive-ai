@@ -27,6 +27,7 @@ from ..schemas.m3 import (
     PairResponse,
     RefreshTokenRequest,
 )
+from ..services.audit import record_audit_log
 from ..services.mappers import ensure_utc
 from ..services.rate_limiter import enforce_login_rate_limit, enforce_pair_rate_limit
 
@@ -101,6 +102,17 @@ def login(
         or not user.is_active
         or not verify_password(payload.password, user.password_hash)
     ):
+        record_audit_log(
+            db,
+            organization_id=user.organization_id if user is not None else None,
+            actor_id=user.id if user is not None else None,
+            action="login_failed",
+            entity="user",
+            entity_id=user.id if user is not None else ident,
+            request=request,
+            meta={"username": ident},
+            commit=True,
+        )
         raise AppError(
             status.HTTP_401_UNAUTHORIZED,
             "INVALID_CREDENTIALS",
@@ -110,6 +122,16 @@ def login(
     now = datetime.now(timezone.utc)
     user.last_login_at = now
     access_token, raw_refresh, _ = _issue_token_pair(db, user, request)
+    record_audit_log(
+        db,
+        organization_id=user.organization_id,
+        actor_id=user.id,
+        action="login_success",
+        entity="user",
+        entity_id=user.id,
+        request=request,
+        meta={"username": user.username, "role": user.role},
+    )
     db.commit()
 
     cfg = get_config()
@@ -234,6 +256,7 @@ def logout(
 @router.post("/change-password", response_model=AuthUserSchema)
 def change_password(
     payload: ChangePasswordRequest,
+    request: Request,
     current_user: User = Depends(get_current_user_allow_must_change),
     db: Session = Depends(get_db),
 ) -> AuthUserSchema:
@@ -262,6 +285,15 @@ def change_password(
             RefreshToken.revoked_at.is_(None),
         )
         .values(revoked_at=now)
+    )
+    record_audit_log(
+        db,
+        organization_id=current_user.organization_id,
+        actor_id=current_user.id,
+        action="change_password",
+        entity="user",
+        entity_id=current_user.id,
+        request=request,
     )
     db.commit()
     db.refresh(current_user)
