@@ -4,6 +4,7 @@ import type {
 } from '../types';
 
 export const SESSION_EXPIRED = 'predrive:session-expired';
+export const SESSION_REFRESHED = 'predrive:session-refreshed';
 
 export class ApiError extends Error {
   constructor(message: string, readonly status: number, readonly code?: string) {
@@ -20,6 +21,8 @@ export interface LiveHandlers {
 
 export interface AdminApi {
   setAccessToken(token: string | null): void;
+  setRefreshToken?(token: string | null): void;
+  logout?(refreshToken?: string | null): Promise<void>;
   login(username: string, password: string): Promise<LoginResult>;
   me(signal?: AbortSignal): Promise<User>;
   getLive(signal?: AbortSignal): Promise<LiveDriverState[]>;

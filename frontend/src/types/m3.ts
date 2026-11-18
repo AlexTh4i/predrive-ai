@@ -20,10 +20,13 @@ export interface AuthUser {
   role: Role;
   fullName: string;
   organizationId: string;
+  mustChangePassword?: boolean;
 }
 
 export interface LoginResponse {
   accessToken: string;
+  refreshToken?: string;
+  expiresIn?: number;
   user: AuthUser;
 }
 
@@ -136,9 +139,12 @@ export type DriverMode = 'online' | 'offline_demo';
 
 export interface DriverAuthSession {
   accessToken: string;
+  refreshToken?: string;
   user: AuthUser;
   vehicleName?: string;
   organizationName?: string;
   consentedAt?: string;
+  consentVersion?: string;
+  locationConsent?: boolean;
 }
 

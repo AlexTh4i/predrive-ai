@@ -119,8 +119,10 @@ def get_current_user_allow_must_change(
 
 
 def get_current_user(
-    user: User = Depends(get_current_user_allow_must_change),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
+    db: Session = Depends(get_db),
 ) -> User:
+    user = get_current_user_allow_must_change(credentials=credentials, db=db)
     if user.must_change_password:
         raise AppError(
             status.HTTP_403_FORBIDDEN,
