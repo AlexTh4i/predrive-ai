@@ -653,5 +653,49 @@ def test_p1_5_strict_multi_tenant_isolation_uuid_guessing_sse_and_reports(
     assert mismatch_res.json()["error"]["code"] == "ORG_MISMATCH"
 
 
+def test_p1_6_production_docs_disabled_cors_security_headers_and_body_limit(
+    p1_client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("ENV", "production")
+    monkeypatch.setenv("CORS_ORIGINS", "https://admin.predrive.vn")
+    monkeypatch.setenv("PREDRIVE_MAX_BODY_BYTES", "512")
+
+    # 1. Swagger / OpenAPI disabled in production -> 404
+    for doc_path in ("/docs", "/redoc", "/openapi.json"):
+        r = p1_client.get(doc_path)
+        assert r.status_code == 404
+        assert r.headers["X-Content-Type-Options"] == "nosniff"
+        assert r.headers["X-Frame-Options"] == "DENY"
+        assert "Strict-Transport-Security" in r.headers
+
+    # 2. CORS strictly allows ONLY https://admin.predrive.vn, rejects http://localhost:5174 / evil origin
+    ok_cors = p1_client.options(
+        "/api/v1/live",
+        headers={
+            "Origin": "https://admin.predrive.vn",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+    assert ok_cors.status_code == 200
+    assert ok_cors.headers.get("Access-Control-Allow-Origin") == "https://admin.predrive.vn"
+
+    bad_cors = p1_client.options(
+        "/api/v1/live",
+        headers={
+            "Origin": "https://evil.attacker.com",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+    assert bad_cors.status_code == 400
+    assert "Access-Control-Allow-Origin" not in bad_cors.headers
+
+    # 3. Body size limit -> > 512 bytes returns 413 PAYLOAD_TOO_LARGE
+    huge_payload = {"username": "x" * 600, "password": "y" * 200}
+    r_413 = p1_client.post("/api/v1/auth/login", json=huge_payload)
+    assert r_413.status_code == 413
+    assert r_413.json()["error"]["code"] == "PAYLOAD_TOO_LARGE"
+
+
+
 
 

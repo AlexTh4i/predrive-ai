@@ -11,8 +11,8 @@ import time
 from typing import Any
 from uuid import UUID, uuid4
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse, PlainTextResponse
 from PIL import Image, UnidentifiedImageError
 from pydantic import ValidationError
 from sqlalchemy import select
@@ -144,31 +144,119 @@ async def lifespan(_: FastAPI):
         active_sessions.clear()
 
 
+_boot_cfg = get_config()
 app = FastAPI(
-    title="PREDRIVE AI Gateway & Fleet Backend (M3)",
-    version="0.3.0",
+    title="PREDRIVE AI Gateway & Fleet Backend",
+    version="0.4.0",
     lifespan=lifespan,
+    docs_url=None if _boot_cfg.is_production else "/docs",
+    redoc_url=None if _boot_cfg.is_production else "/redoc",
+    openapi_url=None if _boot_cfg.is_production else "/openapi.json",
 )
 
 register_error_handlers(app)
 
-origins = [
-    o.strip()
-    for o in os.getenv(
-        "PREDRIVE_ALLOWED_ORIGINS",
-        "http://localhost:5173,https://localhost:5173,http://127.0.0.1:5173,"
-        "http://localhost:5174,http://127.0.0.1:5174,http://localhost:4174,http://127.0.0.1:4174,"
-        "https://localhost,http://localhost,capacitor://localhost",
-    ).split(",")
-    if o.strip()
-]
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization"],
-)
+_DOCS_PATHS = {"/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json"}
+
+
+def _apply_security_and_cors_headers(
+    response: Response, origin: str | None, allowed_origins: list[str], is_prod: bool
+) -> Response:
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault(
+        "Permissions-Policy", "camera=(), microphone=(), geolocation=()"
+    )
+    if is_prod:
+        response.headers.setdefault(
+            "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
+        )
+        response.headers.setdefault(
+            "Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'"
+        )
+    if origin and origin in allowed_origins:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Vary"] = "Origin"
+    return response
+
+
+@app.middleware("http")
+async def production_security_middleware(request: Request, call_next):
+    cfg = get_config()
+    origin = request.headers.get("origin")
+
+    # 1. Disable public Swagger / OpenAPI docs in production (R5 / P1-6)
+    if cfg.is_production and request.url.path in _DOCS_PATHS:
+        resp = JSONResponse(
+            status_code=404,
+            content={"error": {"code": "NOT_FOUND", "message": "Not Found"}},
+        )
+        return _apply_security_and_cors_headers(
+            resp, origin, cfg.cors_origins, cfg.is_production
+        )
+
+    # 2. Dynamic CORS preflight strictly bound to CORS_ORIGINS
+    if request.method == "OPTIONS" and "access-control-request-method" in request.headers:
+        if origin and origin in cfg.cors_origins:
+            preflight = PlainTextResponse("OK", status_code=200)
+            preflight.headers["Access-Control-Allow-Methods"] = (
+                "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+            )
+            preflight.headers["Access-Control-Allow-Headers"] = (
+                "Content-Type, Authorization, X-API-Key"
+            )
+            preflight.headers["Access-Control-Max-Age"] = "600"
+            return _apply_security_and_cors_headers(
+                preflight, origin, cfg.cors_origins, cfg.is_production
+            )
+        disallowed = PlainTextResponse("Disallowed CORS origin", status_code=400)
+        return _apply_security_and_cors_headers(
+            disallowed, None, cfg.cors_origins, cfg.is_production
+        )
+
+    # 3. Request body size limit (P1-6)
+    max_bytes = cfg.max_body_bytes
+    cl_header = request.headers.get("content-length")
+    if cl_header:
+        try:
+            if int(cl_header) > max_bytes:
+                too_large = JSONResponse(
+                    status_code=413,
+                    content={
+                        "error": {
+                            "code": "PAYLOAD_TOO_LARGE",
+                            "message": f"Request body exceeds limit ({max_bytes} bytes)",
+                        }
+                    },
+                )
+                return _apply_security_and_cors_headers(
+                    too_large, origin, cfg.cors_origins, cfg.is_production
+                )
+        except ValueError:
+            pass
+
+    if request.method in ("POST", "PUT", "PATCH"):
+        body_bytes = await request.body()
+        if len(body_bytes) > max_bytes:
+            too_large = JSONResponse(
+                status_code=413,
+                content={
+                    "error": {
+                        "code": "PAYLOAD_TOO_LARGE",
+                        "message": f"Request body exceeds limit ({max_bytes} bytes)",
+                    }
+                },
+            )
+            return _apply_security_and_cors_headers(
+                too_large, origin, cfg.cors_origins, cfg.is_production
+            )
+
+    response = await call_next(request)
+    return _apply_security_and_cors_headers(
+        response, origin, cfg.cors_origins, cfg.is_production
+    )
 
 # Mount M3 API routers
 app.include_router(auth_router.router)
