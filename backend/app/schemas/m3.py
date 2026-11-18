@@ -488,3 +488,25 @@ class ReportItem(CamelModel):
     createdAt: UtcDatetime
 
 
+class EscalationPolicyItem(CamelModel):
+    id: str
+    level: int = Field(ge=1, le=3)
+    afterSeconds: int = Field(ge=5)
+    notifyRole: UserRole
+    channel: Literal["push", "sms", "zalo", "call"]
+    isActive: bool = True
+
+
+class EscalationItem(CamelModel):
+    id: str
+    eventId: str
+    policyId: Optional[str] = None
+    level: Optional[int] = None
+    notifiedUserId: Optional[str] = None
+    notifiedUserName: Optional[str] = None
+    notifiedRole: Optional[str] = None
+    channel: str
+    status: str
+    sentAt: UtcDatetime
+
+

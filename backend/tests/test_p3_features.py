@@ -302,3 +302,162 @@ def test_p3_3_multi_level_alerts_and_dynamic_settings_sync(
         )
         assert hb_res.status_code == 200
         assert hb_res.json()["settings"]["level3Sec"] == pytest.approx(6.5)
+
+
+def test_p3_5_auto_escalation_levels_recipients_timing_ack_stop_and_no_duplicates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from app.core import database as db_mod
+    from app.services.notify import notification_dispatcher
+    from app.services.watchdog import check_pending_escalations
+
+    app = _setup_test_app(tmp_path, monkeypatch)
+    notification_dispatcher.reset_defaults()
+
+    with TestClient(app) as client:
+        mgr = client.post(
+            "/api/v1/auth/login", json={"username": "manager", "password": "manager123"}
+        ).json()
+        mgr_token = mgr["accessToken"]
+        mgr_id = mgr["user"]["id"]
+
+        disp = client.post(
+            "/api/v1/auth/login", json={"username": "dispatcher", "password": "dispatcher123"}
+        ).json()
+        disp_token = disp["accessToken"]
+        disp_id = disp["user"]["id"]
+
+        drv = client.post(
+            "/api/v1/auth/login", json={"username": "driver1", "password": "driver123"}
+        ).json()
+        drv_token = drv["accessToken"]
+
+        # Verify seeded policies: Level 1 (60s -> dispatcher/push), Level 2 (180s -> manager/push), Level 3 (300s -> manager/sms)
+        pols = client.get("/api/v1/escalation-policies", headers=_auth(mgr_token)).json()
+        assert [(p["level"], p["afterSeconds"], p["notifyRole"], p["channel"]) for p in pols] == [
+            (1, 60, "dispatcher", "push"),
+            (2, 180, "manager", "push"),
+            (3, 300, "manager", "sms"),
+        ]
+
+        t0 = datetime.now(timezone.utc)
+        sess_id = str(uuid4())
+        client.post(
+            "/api/v1/sessions",
+            json={"sessionId": sess_id, "startedAt": t0.isoformat()},
+            headers=_auth(drv_token),
+        )
+
+        # Create an OPEN warning event at t0
+        ev1_id = str(uuid4())
+        r1 = client.post(
+            f"/api/v1/sessions/{sess_id}/events",
+            json={
+                "eventId": ev1_id,
+                "type": "DROWSINESS",
+                "level": "WARNING",
+                "status": "OPEN",
+                "state": "DROWSINESS_SIGNS",
+                "riskScore": 0.82,
+                "startedAt": t0.isoformat(),
+                "durationSec": 3,
+                "capturedAt": t0.isoformat(),
+            },
+            headers=_auth(drv_token),
+        )
+        assert r1.status_code == 200
+        ev1_db_id = r1.json()["id"]
+
+        # 1) At t0 + 45s (< ack_timeout_sec=60s): zero escalations
+        with db_mod.SessionLocal() as db:
+            assert check_pending_escalations(db, now_utc=t0 + timedelta(seconds=45)) == []
+
+        # 2) At t0 + 65s (>= 60s): Level 1 triggers -> dispatcher notified via push, status becomes ESCALATED
+        with db_mod.SessionLocal() as db:
+            esc_65 = check_pending_escalations(db, now_utc=t0 + timedelta(seconds=65))
+            assert len(esc_65) >= 1
+            ev1_esc = [e for e in esc_65 if e.event_id == ev1_db_id]
+            assert len(ev1_esc) == 1
+            assert ev1_esc[0].notified_user_id == disp_id
+            assert ev1_esc[0].channel == "push"
+
+            # Re-run at t0 + 70s -> MUST NOT send duplicates!
+            dup_check = [
+                e
+                for e in check_pending_escalations(db, now_utc=t0 + timedelta(seconds=70))
+                if e.event_id == ev1_db_id
+            ]
+            assert dup_check == []
+
+        ev1_list = client.get(
+            f"/api/v1/events/{ev1_db_id}/escalations", headers=_auth(mgr_token)
+        ).json()
+        assert len(ev1_list) == 1
+        assert ev1_list[0]["level"] == 1
+        assert ev1_list[0]["notifiedUserId"] == disp_id
+
+        # Verify event status transitioned to ESCALATED
+        ev_page = client.get("/api/v1/events?pageSize=20", headers=_auth(mgr_token)).json()
+        ev1_row = next(x for x in ev_page["items"] if x["id"] == ev1_db_id)
+        assert ev1_row["status"] == "ESCALATED"
+
+        # 3) At t0 + 185s (>= 180s): Level 2 triggers -> manager notified via push
+        with db_mod.SessionLocal() as db:
+            esc_185 = [
+                e
+                for e in check_pending_escalations(db, now_utc=t0 + timedelta(seconds=185))
+                if e.event_id == ev1_db_id
+            ]
+            assert len(esc_185) == 1
+            assert esc_185[0].notified_user_id == mgr_id
+            assert esc_185[0].channel == "push"
+
+        # 4) Dispatcher acknowledges event at t0 + 200s -> stops further escalation!
+        ack_res = client.post(
+            f"/api/v1/events/{ev1_db_id}/ack",
+            json={"note": "Đã gọi tài xế dừng nghỉ"},
+            headers=_auth(disp_token),
+        )
+        assert ack_res.status_code == 200
+
+        # At t0 + 320s (>= 300s Level 3): NO Level 3 escalation sent for acked event!
+        with db_mod.SessionLocal() as db:
+            esc_320 = [
+                e
+                for e in check_pending_escalations(db, now_utc=t0 + timedelta(seconds=320))
+                if e.event_id == ev1_db_id
+            ]
+            assert esc_320 == []
+
+        final_esc = client.get(
+            f"/api/v1/events/{ev1_db_id}/escalations", headers=_auth(mgr_token)
+        ).json()
+        assert [x["level"] for x in final_esc] == [1, 2]
+        assert all(x["status"] == "acked" for x in final_esc)
+
+        # 5) A second un-acked event reaching 310s escalates all the way through Level 1 -> 2 -> 3 (sms)
+        ev2_id = str(uuid4())
+        r2 = client.post(
+            f"/api/v1/sessions/{sess_id}/events",
+            json={
+                "eventId": ev2_id,
+                "type": "DROWSINESS",
+                "level": "CRITICAL",
+                "status": "OPEN",
+                "state": "CRITICAL",
+                "riskScore": 0.96,
+                "startedAt": t0.isoformat(),
+                "durationSec": 5,
+                "capturedAt": t0.isoformat(),
+            },
+            headers=_auth(drv_token),
+        )
+        ev2_db_id = r2.json()["id"]
+        with db_mod.SessionLocal() as db:
+            esc_ev2 = [
+                e
+                for e in check_pending_escalations(db, now_utc=t0 + timedelta(seconds=310))
+                if e.event_id == ev2_db_id
+            ]
+            assert len(esc_ev2) == 3
+            assert [e.channel for e in esc_ev2] == ["push", "push", "sms"]
