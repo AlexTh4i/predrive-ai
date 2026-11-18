@@ -12,7 +12,7 @@ npm install
 npm run dev
 ```
 
-Mở [http://localhost:5174](http://localhost:5174). Web chạy bằng mock ngay khi chưa có tệp môi trường. Trang đăng nhập có nút điền nhanh tài khoản mô phỏng.
+Mở [http://localhost:5174](http://localhost:5174). Mặc định web kết nối thẳng tới máy chủ Backend M3 (`http://127.0.0.1:8000` qua Vite proxy). Nếu muốn chạy dữ liệu mô phỏng (mock) khi không bật backend, đặt `VITE_USE_MOCK=true` trong `.env.local`.
 
 | Tên đăng nhập | Tên hiển thị | Mật khẩu demo | Quyền |
 | --- | --- | --- | --- |
@@ -34,7 +34,7 @@ Mock có sáu tài xế hư cấu, lịch sử 28 ngày và trạng thái thay �
 
 ## Kết nối backend M3
 
-Sao chép `.env.example` thành `.env` (hoặc `.env.local`), đặt `VITE_USE_MOCK=false`, rồi khởi động lại Vite. Giữ `VITE_API_URL=/api/v1` và đặt `API_PROXY_TARGET` theo máy chủ backend để dùng proxy Vite. Nếu gọi trực tiếp khác origin, đặt `VITE_API_URL` thành URL đầy đủ có đuôi `/api/v1` và cấu hình CORS cho frontend.
+Mặc định `VITE_USE_MOCK` là `false` nên chỉ cần chạy `npm run dev` là kết nối thẳng qua Vite proxy tới `http://127.0.0.1:8000` (`API_PROXY_TARGET`). Nếu gọi trực tiếp khác origin, đặt `VITE_API_URL` thành URL đầy đủ có đuôi `/api/v1` và cấu hình CORS cho frontend.
 
 Tài khoản seed thật trên backend M3 (`backend/app/services/seed.py`):
 

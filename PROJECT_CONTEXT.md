@@ -249,7 +249,7 @@ flowchart TD
   .\venv\Scripts\python.exe -m uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload
   ```
 - **Terminal 2 (Web Admin & Điều hành — `:5174`):**
-  Đảm bảo `admin-web/.env` có `VITE_USE_MOCK=false`, `VITE_API_URL=/api/v1`, `API_PROXY_TARGET=http://127.0.0.1:8000`:
+  Mặc định nối thẳng vào Backend `:8000` qua Vite proxy (không cần tạo `.env`; chỉ đặt `VITE_USE_MOCK=true` nếu muốn chạy chế độ mô phỏng):
   ```powershell
   cd d:\CDIO4\admin-web
   npm run dev
