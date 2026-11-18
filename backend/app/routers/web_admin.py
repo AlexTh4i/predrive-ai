@@ -17,6 +17,7 @@ from ..core.security import (
     generate_opaque_token,
     get_current_user,
     get_current_user_sse,
+    get_jwt_org_id,
     hash_password,
     hash_token,
     require_roles,
@@ -1010,6 +1011,58 @@ def export_report_endpoint(
     db.commit()
     db.refresh(rep)
 
+    return ReportItem(
+        id=rep.id,
+        reportType=rep.report_type,  # type: ignore[arg-type]
+        fileFormat=rep.file_format,  # type: ignore[arg-type]
+        periodStart=rep.period_start.isoformat(),
+        periodEnd=rep.period_end.isoformat(),
+        status=rep.status,  # type: ignore[arg-type]
+        storagePath=rep.storage_path,
+        createdAt=ensure_utc(rep.created_at),  # type: ignore[arg-type]
+    )
+
+
+@router.get("/reports", response_model=list[ReportItem])
+def list_reports(
+    current_user: User = Depends(require_roles("manager")),
+    db: Session = Depends(get_db),
+) -> list[ReportItem]:
+    org_id = get_jwt_org_id(current_user)
+    rows = db.scalars(
+        select(ReportModel)
+        .where(ReportModel.organization_id == org_id)
+        .order_by(ReportModel.created_at.desc())
+    ).all()
+    return [
+        ReportItem(
+            id=r.id,
+            reportType=r.report_type,  # type: ignore[arg-type]
+            fileFormat=r.file_format,  # type: ignore[arg-type]
+            periodStart=r.period_start.isoformat(),
+            periodEnd=r.period_end.isoformat(),
+            status=r.status,  # type: ignore[arg-type]
+            storagePath=r.storage_path,
+            createdAt=ensure_utc(r.created_at),  # type: ignore[arg-type]
+        )
+        for r in rows
+    ]
+
+
+@router.get("/reports/{id}", response_model=ReportItem)
+def get_report_by_id(
+    id: str,
+    current_user: User = Depends(require_roles("manager")),
+    db: Session = Depends(get_db),
+) -> ReportItem:
+    org_id = get_jwt_org_id(current_user)
+    rep = db.get(ReportModel, id)
+    if rep is None or rep.organization_id != org_id:
+        raise AppError(
+            status.HTTP_404_NOT_FOUND,
+            "REPORT_NOT_FOUND",
+            "Không tìm thấy báo cáo trong tổ chức",
+        )
     return ReportItem(
         id=rep.id,
         reportType=rep.report_type,  # type: ignore[arg-type]

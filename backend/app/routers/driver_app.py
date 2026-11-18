@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from ..core.database import get_db
 from ..core.errors import AppError
-from ..core.security import bearer_scheme, get_current_user, require_roles
+from ..core.security import bearer_scheme, get_current_user, get_jwt_org_id, require_roles
 from ..models.models import (
     EventModel,
     HeartbeatModel,
@@ -58,17 +58,15 @@ def set_legacy_session_creator(fn: Callable[[], dict[str, Any]]) -> None:
 def _get_owned_session(
     db: Session, session_id: str, current_user: User
 ) -> SessionModel:
+    org_id = get_jwt_org_id(current_user)
     sess = db.get(SessionModel, session_id)
-    if sess is None:
+    if sess is None or sess.organization_id != org_id:
         raise AppError(
             status.HTTP_404_NOT_FOUND,
             "SESSION_NOT_FOUND",
             "Không tìm thấy phiên làm việc",
         )
-    if (
-        sess.driver_id != current_user.id
-        or sess.organization_id != current_user.organization_id
-    ):
+    if sess.driver_id != current_user.id:
         raise AppError(
             status.HTTP_403_FORBIDDEN,
             "FORBIDDEN",
@@ -123,11 +121,12 @@ async def create_or_resume_session(
 
     now = datetime.now(timezone.utc)
     started_utc = ensure_utc(payload.startedAt) or now
-    org_settings = get_or_create_org_settings(db, current_user.organization_id)
+    org_id = get_jwt_org_id(current_user)
+    org_settings = get_or_create_org_settings(db, org_id)
 
     existing = db.get(SessionModel, payload.sessionId)
     if existing is not None:
-        if existing.driver_id != current_user.id:
+        if existing.organization_id != org_id or existing.driver_id != current_user.id:
             raise AppError(
                 status.HTTP_403_FORBIDDEN,
                 "FORBIDDEN",

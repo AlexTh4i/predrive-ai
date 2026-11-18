@@ -463,4 +463,195 @@ def test_p1_4_audit_logs_exact_one_row_per_action_and_manager_pagination(
     assert p1_client.get("/api/v1/audit-logs", headers=disp_hdr).status_code == 403
 
 
+def test_p1_5_strict_multi_tenant_isolation_uuid_guessing_sse_and_reports(
+    p1_client: TestClient,
+):
+    from app.core.security import create_access_token
+    from app.services.seed import ORG_ID, ORG_2_ID
+
+    # Login as Org A (manager, dispatcher, driver1) and Org B (manager2, driver6)
+    mgr_a = p1_client.post(
+        "/api/v1/auth/login", json={"username": "manager", "password": "manager123"}
+    ).json()
+    mgr_a_hdr = {"Authorization": f"Bearer {mgr_a['accessToken']}"}
+
+    drv_a = p1_client.post(
+        "/api/v1/auth/login", json={"username": "driver1", "password": "driver123"}
+    ).json()
+    drv_a_hdr = {"Authorization": f"Bearer {drv_a['accessToken']}"}
+
+    mgr_b = p1_client.post(
+        "/api/v1/auth/login", json={"username": "manager2", "password": "manager123"}
+    ).json()
+    mgr_b_hdr = {"Authorization": f"Bearer {mgr_b['accessToken']}"}
+
+    drv_b = p1_client.post(
+        "/api/v1/auth/login", json={"username": "driver6", "password": "driver123"}
+    ).json()
+    drv_b_hdr = {"Authorization": f"Bearer {drv_b['accessToken']}"}
+
+    # Org B creates resources: pairing code, API key, report, active session + CRITICAL event
+    drv_b_list = p1_client.get("/api/v1/drivers", headers=mgr_b_hdr).json()
+    assert len(drv_b_list) == 5
+    drv_b_id = drv_b["user"]["id"]
+    veh_b_id = drv_b_list[0]["vehicleId"]
+
+    pair_b = p1_client.post(
+        "/api/v1/pairing-codes",
+        json={"vehicleId": veh_b_id, "expiresInMinutes": 60},
+        headers=mgr_b_hdr,
+    ).json()
+    ak_b = p1_client.post(
+        "/api/v1/api-keys",
+        json={"name": "Org B Secret Key"},
+        headers=mgr_b_hdr,
+    ).json()
+    rep_b = p1_client.post(
+        "/api/v1/reports/export",
+        json={"reportType": "weekly", "fileFormat": "pdf"},
+        headers=mgr_b_hdr,
+    ).json()
+
+    sse_broker.clear_history(ORG_ID)
+    sse_broker.clear_history(ORG_2_ID)
+
+    sess_b_id = str(uuid4())
+    ev_b_id = str(uuid4())
+    now_iso = datetime.now(timezone.utc).isoformat()
+    assert (
+        p1_client.post(
+            "/api/v1/sessions",
+            json={"sessionId": sess_b_id, "startedAt": now_iso},
+            headers=drv_b_hdr,
+        ).status_code
+        == 200
+    )
+    assert (
+        p1_client.post(
+            f"/api/v1/sessions/{sess_b_id}/events",
+            json={
+                "eventId": ev_b_id,
+                "type": "DROWSINESS",
+                "level": "CRITICAL",
+                "status": "OPEN",
+                "state": "CRITICAL",
+                "riskScore": 0.96,
+                "startedAt": now_iso,
+                "durationSec": 4,
+                "capturedAt": now_iso,
+            },
+            headers=drv_b_hdr,
+        ).status_code
+        == 200
+    )
+
+    # --- 1. SSE Isolation: Org B emitted CRITICAL alert, Org A must have 0 messages! ---
+    assert len(sse_broker.get_recent_messages(ORG_2_ID)) >= 2
+    assert len(sse_broker.get_recent_messages(ORG_ID)) == 0
+
+    sse_a_text = p1_client.get(
+        "/api/v1/live/stream?max_events=5", headers=mgr_a_hdr
+    ).text
+    assert drv_b_id not in sse_a_text
+    assert ev_b_id not in sse_a_text
+
+    # --- 2. UUID Guessing across ALL endpoints by Org A Manager & Driver ---
+    # Cannot read Org B driver detail or stats
+    assert p1_client.get(f"/api/v1/drivers/{drv_b_id}", headers=mgr_a_hdr).status_code == 404
+    assert p1_client.get(f"/api/v1/drivers/{drv_b_id}/stats", headers=mgr_a_hdr).status_code == 404
+
+    # Cannot see Org B events even when passing Org B driverId or organizationId query param
+    ev_leak_check = p1_client.get(
+        f"/api/v1/events?driverId={drv_b_id}&organizationId={ORG_2_ID}",
+        headers=mgr_a_hdr,
+    ).json()
+    assert ev_leak_check["total"] == 0
+
+    # Cannot ack Org B event by UUID
+    assert (
+        p1_client.post(
+            f"/api/v1/events/{ev_b_id}/ack",
+            json={"note": "cross-tenant hijack"},
+            headers=mgr_a_hdr,
+        ).status_code
+        == 404
+    )
+
+    # Cannot create pairing code or driver attached to Org B's vehicle UUID
+    assert (
+        p1_client.post(
+            "/api/v1/pairing-codes",
+            json={"vehicleId": veh_b_id},
+            headers=mgr_a_hdr,
+        ).status_code
+        == 404
+    )
+    assert (
+        p1_client.post(
+            "/api/v1/drivers",
+            json={"fullName": "Cross Veh", "phone": "0977111222", "vehicleId": veh_b_id},
+            headers=mgr_a_hdr,
+        ).status_code
+        == 404
+    )
+
+    # Driver A cannot pair using Org B's pairing code!
+    assert (
+        p1_client.post(
+            "/api/v1/auth/pair",
+            json={"code": pair_b["code"]},
+            headers=drv_a_hdr,
+        ).status_code
+        == 404
+    )
+
+    # Driver A cannot post heartbeat/events/end or hijack Org B's session UUID
+    assert (
+        p1_client.post(
+            "/api/v1/sessions",
+            json={"sessionId": sess_b_id, "startedAt": now_iso},
+            headers=drv_a_hdr,
+        ).status_code
+        == 403
+    )
+    assert (
+        p1_client.post(
+            f"/api/v1/sessions/{sess_b_id}/heartbeat",
+            json={
+                "state": "NORMAL",
+                "imageQuality": "GOOD",
+                "continuousDrivingSec": 10,
+                "vehicleMoving": True,
+                "capturedAt": now_iso,
+            },
+            headers=drv_a_hdr,
+        ).status_code
+        == 404
+    )
+
+    # Cannot read or revoke Org B's API keys or reports
+    org_a_keys = p1_client.get("/api/v1/api-keys", headers=mgr_a_hdr).json()
+    assert all(k["id"] != ak_b["id"] for k in org_a_keys)
+    assert p1_client.delete(f"/api/v1/api-keys/{ak_b['id']}", headers=mgr_a_hdr).status_code == 404
+
+    org_a_reports = p1_client.get("/api/v1/reports", headers=mgr_a_hdr).json()
+    assert all(r["id"] != rep_b["id"] for r in org_a_reports)
+    assert p1_client.get(f"/api/v1/reports/{rep_b['id']}", headers=mgr_a_hdr).status_code == 404
+
+    # Audit logs strictly isolated
+    org_a_audits = p1_client.get("/api/v1/audit-logs?pageSize=100", headers=mgr_a_hdr).json()
+    assert all(item["organizationId"] == ORG_ID for item in org_a_audits["items"])
+
+    # Forged/mismatched org claim in JWT (user belongs to Org A, token claims Org B) -> 401 ORG_MISMATCH
+    mismatched_token = create_access_token(
+        user_id=mgr_a["user"]["id"], role="manager", organization_id=ORG_2_ID
+    )
+    mismatch_res = p1_client.get(
+        "/api/v1/live", headers={"Authorization": f"Bearer {mismatched_token}"}
+    )
+    assert mismatch_res.status_code == 401
+    assert mismatch_res.json()["error"]["code"] == "ORG_MISMATCH"
+
+
+
 
