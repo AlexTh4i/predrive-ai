@@ -42,6 +42,7 @@ from ..services.mappers import (
     settings_to_schema,
 )
 from ..services.sse import sse_broker
+from ..services.rate_limiter import enforce_events_rate_limit, enforce_heartbeat_rate_limit
 
 router = APIRouter(prefix="/api/v1/sessions", tags=["Driver App"])
 
@@ -206,6 +207,7 @@ def post_session_event(
     db: Session = Depends(get_db),
 ) -> AlertEvent:
     sess = _get_owned_session(db, id, current_user)
+    enforce_events_rate_limit(sess.id)
     alert_event, _ = upsert_session_event(
         db=db,
         session_obj=sess,
@@ -224,6 +226,7 @@ def post_session_events_batch(
     db: Session = Depends(get_db),
 ) -> BatchEventsResponse:
     sess = _get_owned_session(db, id, current_user)
+    enforce_events_rate_limit(sess.id)
     results: list[AlertEvent] = []
     for item in payload.events:
         ev_schema, _ = upsert_session_event(
@@ -245,6 +248,7 @@ def post_session_heartbeat(
     db: Session = Depends(get_db),
 ) -> HeartbeatResponse:
     sess = _get_owned_session(db, id, current_user)
+    enforce_heartbeat_rate_limit(sess.id)
     now = datetime.now(timezone.utc)
     captured_utc = ensure_utc(payload.capturedAt) or now
 

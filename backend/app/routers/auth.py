@@ -28,6 +28,7 @@ from ..schemas.m3 import (
     RefreshTokenRequest,
 )
 from ..services.mappers import ensure_utc
+from ..services.rate_limiter import enforce_login_rate_limit, enforce_pair_rate_limit
 
 router = APIRouter(prefix="/api/v1/auth", tags=["Auth"])
 
@@ -91,6 +92,7 @@ def login(
     db: Session = Depends(get_db),
 ) -> LoginResponse:
     ident = payload.username.strip()
+    enforce_login_rate_limit(_client_ip(request), ident)
     user = db.scalar(
         select(User).where(or_(User.username == ident, User.phone == ident))
     )
@@ -276,9 +278,11 @@ def get_me(
 @router.post("/pair", response_model=PairResponse)
 def pair_driver_vehicle(
     payload: PairRequest,
+    request: Request,
     current_user: User = Depends(require_roles("driver", allow_must_change=True)),
     db: Session = Depends(get_db),
 ) -> PairResponse:
+    enforce_pair_rate_limit(current_user.id, _client_ip(request))
     now = datetime.now(timezone.utc)
     code = payload.code.strip().upper()
     # Multi-tenant enforcement (R6 / P1-5): driver can ONLY pair with a code from their own organization!

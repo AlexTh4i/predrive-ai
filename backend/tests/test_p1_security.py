@@ -210,3 +210,128 @@ def test_p1_2_refresh_token_rotation_hash_revocation_and_reuse_detection(
         == 401
     )
 
+
+@pytest.mark.parametrize(
+    "redis_url",
+    ["", "redis://127.0.0.1:63799/0"],
+    ids=["in_memory", "redis"],
+)
+def test_p1_3_rate_limiting_login_pair_events_heartbeat_429_retry_after(
+    p1_client: TestClient, monkeypatch: pytest.MonkeyPatch, redis_url: str
+):
+    from app.services.rate_limiter import rate_limiter
+
+    monkeypatch.setenv("REDIS_URL", redis_url)
+    monkeypatch.setenv("PREDRIVE_RL_LOGIN_USER_LIMIT", "3")
+    monkeypatch.setenv("PREDRIVE_RL_PAIR_LIMIT", "2")
+    monkeypatch.setenv("PREDRIVE_RL_EVENTS_LIMIT", "2")
+    monkeypatch.setenv("PREDRIVE_RL_HEARTBEAT_LIMIT", "2")
+    rate_limiter.reset()
+
+    # 1. Login rate limit (per IP + username) -> 4th attempt returns 429 + Retry-After
+    for _ in range(3):
+        r = p1_client.post(
+            "/api/v1/auth/login",
+            json={"username": "driver1", "password": "wrong_password"},
+        )
+        assert r.status_code == 401
+
+    r_429 = p1_client.post(
+        "/api/v1/auth/login",
+        json={"username": "driver1", "password": "wrong_password"},
+    )
+    assert r_429.status_code == 429
+    assert int(r_429.headers["Retry-After"]) >= 1
+    assert r_429.json()["error"]["code"] == "RATE_LIMITED"
+
+    # Different username on same IP is still allowed (proves IP+username key granularity)
+    drv2_login = p1_client.post(
+        "/api/v1/auth/login",
+        json={"username": "driver2", "password": "driver123"},
+    )
+    assert drv2_login.status_code == 200
+    drv2_hdr = {"Authorization": f"Bearer {drv2_login.json()['accessToken']}"}
+
+    # 2. Pair rate limit -> 3rd attempt returns 429 + Retry-After
+    for _ in range(2):
+        pr = p1_client.post(
+            "/api/v1/auth/pair", json={"code": "BAD999"}, headers=drv2_hdr
+        )
+        assert pr.status_code == 404
+    pr_429 = p1_client.post(
+        "/api/v1/auth/pair", json={"code": "BAD999"}, headers=drv2_hdr
+    )
+    assert pr_429.status_code == 429
+    assert int(pr_429.headers["Retry-After"]) >= 1
+
+    # 3. Session /events/batch and /heartbeat rate limits (per device/session)
+    sess_id = str(uuid4())
+    now_iso = datetime.now(timezone.utc).isoformat()
+    assert (
+        p1_client.post(
+            "/api/v1/sessions",
+            json={"sessionId": sess_id, "startedAt": now_iso},
+            headers=drv2_hdr,
+        ).status_code
+        == 200
+    )
+
+    hb_body = {
+        "state": "NORMAL",
+        "imageQuality": "GOOD",
+        "continuousDrivingSec": 30,
+        "vehicleMoving": True,
+        "capturedAt": now_iso,
+    }
+    for _ in range(2):
+        assert (
+            p1_client.post(
+                f"/api/v1/sessions/{sess_id}/heartbeat",
+                json=hb_body,
+                headers=drv2_hdr,
+            ).status_code
+            == 200
+        )
+    hb_429 = p1_client.post(
+        f"/api/v1/sessions/{sess_id}/heartbeat",
+        json=hb_body,
+        headers=drv2_hdr,
+    )
+    assert hb_429.status_code == 429
+    assert int(hb_429.headers["Retry-After"]) >= 1
+
+    ev_batch = {
+        "events": [
+            {
+                "eventId": str(uuid4()),
+                "type": "DROWSINESS",
+                "level": "WARNING",
+                "status": "OPEN",
+                "state": "DROWSINESS_SIGNS",
+                "riskScore": 0.8,
+                "startedAt": now_iso,
+                "durationSec": 2,
+                "capturedAt": now_iso,
+            }
+        ]
+    }
+    for _ in range(2):
+        assert (
+            p1_client.post(
+                f"/api/v1/sessions/{sess_id}/events/batch",
+                json=ev_batch,
+                headers=drv2_hdr,
+            ).status_code
+            == 200
+        )
+    ev_429 = p1_client.post(
+        f"/api/v1/sessions/{sess_id}/events/batch",
+        json=ev_batch,
+        headers=drv2_hdr,
+    )
+    assert ev_429.status_code == 429
+    assert int(ev_429.headers["Retry-After"]) >= 1
+
+    rate_limiter.reset()
+
+
