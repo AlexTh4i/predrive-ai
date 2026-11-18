@@ -1008,3 +1008,217 @@ def test_p3_6_risk_scores_and_pdf_excel_report_export_manager_only(
         assert dl_pdf.headers["content-type"].startswith("application/pdf")
         assert dl_pdf.content.startswith(b"%PDF-")
         assert len(dl_pdf.content) > 500
+
+
+def test_p3_8_public_api_keys_scopes_revocation_hmac_webhooks_retry_and_tracker_gps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import hashlib
+    import hmac
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    import json as json_mod
+    import threading
+
+    from sqlalchemy import select
+
+    from app.core import database as db_mod
+    from app.models.models import ApiKey, Webhook
+
+    monkeypatch.setenv("WEBHOOK_MAX_ATTEMPTS", "3")
+    monkeypatch.setenv("WEBHOOK_BACKOFF_BASE_SEC", "0.02")
+
+    webhook_deliveries: list[dict] = []
+    attempt_counter = {"count": 0}
+
+    class _WebhookReceiver(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            attempt_counter["count"] += 1
+            length = int(self.headers.get("Content-Length", "0"))
+            raw_bytes = self.rfile.read(length)
+            # Fail the very first HTTP attempt with 502 to prove backoff retry works!
+            if attempt_counter["count"] == 1:
+                self.send_response(502)
+                self.end_headers()
+                self.wfile.write(b"Bad Gateway")
+                return
+
+            webhook_deliveries.append(
+                {
+                    "event": self.headers.get("X-PreDrive-Event"),
+                    "signature": self.headers.get("X-PreDrive-Signature"),
+                    "delivery_id": self.headers.get("X-PreDrive-Delivery"),
+                    "raw_bytes": raw_bytes,
+                    "json": json_mod.loads(raw_bytes.decode("utf-8")),
+                }
+            )
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+
+        def log_message(self, format, *args):  # noqa: A002
+            return
+
+    wh_server = HTTPServer(("127.0.0.1", 0), _WebhookReceiver)
+    wh_port = wh_server.server_address[1]
+    t = threading.Thread(target=wh_server.serve_forever, daemon=True)
+    t.start()
+
+    try:
+        app = _setup_test_app(tmp_path, monkeypatch)
+        with TestClient(app) as client:
+            # 1) Verify clear OpenAPI contract for Public API & X-API-Key security scheme
+            openapi = client.get("/openapi.json").json()
+            assert "/api/public/v1/vehicles" in openapi["paths"]
+            assert "/api/public/v1/events" in openapi["paths"]
+            assert "/api/public/v1/tracker/locations" in openapi["paths"]
+            assert "APIKeyHeader" in openapi["components"]["securitySchemes"]
+
+            mgr = client.post(
+                "/api/v1/auth/login", json={"username": "manager", "password": "manager123"}
+            ).json()
+            mgr_token = mgr["accessToken"]
+
+            drv = client.post(
+                "/api/v1/auth/login", json={"username": "driver1", "password": "driver123"}
+            ).json()
+            drv_token = drv["accessToken"]
+
+            # 2) Create API key with events:read, vehicles:read, tracker:write; verify only hash stored
+            key_res = client.post(
+                "/api/v1/api-keys",
+                json={
+                    "name": "Partner ERP & GPS Box",
+                    "scopes": ["events:read", "vehicles:read", "tracker:write"],
+                },
+                headers=_auth(mgr_token),
+            )
+            assert key_res.status_code == 201
+            key_id = key_res.json()["id"]
+            raw_api_key = key_res.json()["rawKey"]
+
+            readonly_key_res = client.post(
+                "/api/v1/api-keys",
+                json={"name": "Readonly BI", "scopes": ["events:read"]},
+                headers=_auth(mgr_token),
+            )
+            readonly_key = readonly_key_res.json()["rawKey"]
+
+            with db_mod.SessionLocal() as db:
+                db_key = db.get(ApiKey, key_id)
+                assert db_key is not None
+                assert db_key.key_hash != raw_api_key
+                assert len(db_key.key_hash) == 64
+
+            # Scope check: readonly_key cannot write tracker locations -> 403
+            assert (
+                client.post(
+                    "/api/public/v1/tracker/locations",
+                    json={"trackerDeviceId": "GPS-0001", "lat": 10.8, "lng": 106.7},
+                    headers={"X-API-Key": readonly_key},
+                ).status_code
+                == 403
+            )
+
+            # Public vehicles & events strictly isolated to Org 1
+            pub_vehs = client.get(
+                "/api/public/v1/vehicles", headers={"X-API-Key": raw_api_key}
+            )
+            assert pub_vehs.status_code == 200
+            plates = [v["plate"] for v in pub_vehs.json()]
+            assert "51B-123.45" in plates
+            assert "29H-126.42" not in plates  # Org 2 vehicle excluded!
+
+            # Hardware GPS tracker ingestion via vehicles.tracker_device_id ("GPS-0001" belongs to Org 1; "GPS-0006" belongs to Org 2)
+            trk_ok = client.post(
+                "/api/public/v1/tracker/locations",
+                json={
+                    "trackerDeviceId": "GPS-0001",
+                    "lat": 10.8888,
+                    "lng": 106.7777,
+                    "speedKmh": 75.5,
+                },
+                headers={"X-API-Key": raw_api_key},
+            )
+            assert trk_ok.status_code == 201
+            assert trk_ok.json()["plate"] == "51B-123.45"
+
+            trk_other_org = client.post(
+                "/api/public/v1/tracker/locations",
+                json={"trackerDeviceId": "GPS-0006", "lat": 21.0, "lng": 105.8},
+                headers={"X-API-Key": raw_api_key},
+            )
+            assert trk_other_org.status_code == 404
+
+            # Revoke API key -> immediately rejected with 401 API_KEY_REVOKED!
+            rev_res = client.delete(f"/api/v1/api-keys/{key_id}", headers=_auth(mgr_token))
+            assert rev_res.status_code == 200
+            rejected = client.get(
+                "/api/public/v1/vehicles", headers={"X-API-Key": raw_api_key}
+            )
+            assert rejected.status_code == 401
+            assert rejected.json()["error"]["code"] == "API_KEY_REVOKED"
+
+            # 3) Register HMAC webhook for alert.created & alert.escalated
+            wh_res = client.post(
+                "/api/v1/webhooks",
+                json={
+                    "url": f"http://127.0.0.1:{wh_port}/partner-hook",
+                    "events": ["alert.created", "alert.escalated"],
+                },
+                headers=_auth(mgr_token),
+            )
+            assert wh_res.status_code == 201
+            wh_id = wh_res.json()["id"]
+            wh_secret = wh_res.json()["secret"]
+
+            with db_mod.SessionLocal() as db:
+                wh_db = db.get(Webhook, wh_id)
+                assert wh_db is not None
+                assert wh_secret not in wh_db.secret_hash
+                assert wh_db.secret_hash.startswith("enc1:")
+
+            now = datetime.now(timezone.utc)
+            sess_id = str(uuid4())
+            client.post(
+                "/api/v1/sessions",
+                json={"sessionId": sess_id, "startedAt": now.isoformat()},
+                headers=_auth(drv_token),
+            )
+
+            # Trigger CRITICAL ESCALATED event -> fires alert.created (with 502->200 backoff retry!) AND alert.escalated!
+            ev_res = client.post(
+                f"/api/v1/sessions/{sess_id}/events",
+                json={
+                    "eventId": str(uuid4()),
+                    "type": "DROWSINESS",
+                    "level": "CRITICAL",
+                    "severityLevel": 3,
+                    "status": "ESCALATED",
+                    "state": "CRITICAL",
+                    "riskScore": 0.97,
+                    "startedAt": now.isoformat(),
+                    "durationSec": 5,
+                    "capturedAt": now.isoformat(),
+                },
+                headers=_auth(drv_token),
+            )
+            assert ev_res.status_code == 200
+
+            # Attempt 1 failed with 502, retried -> 2 deliveries succeeded (alert.created + alert.escalated), >= 3 total HTTP attempts!
+            assert attempt_counter["count"] >= 3
+            assert [d["event"] for d in webhook_deliveries] == [
+                "alert.created",
+                "alert.escalated",
+            ]
+            for d in webhook_deliveries:
+                expected_sig = (
+                    "sha256="
+                    + hmac.new(
+                        wh_secret.encode("utf-8"), d["raw_bytes"], hashlib.sha256
+                    ).hexdigest()
+                )
+                assert d["signature"] == expected_sig
+                assert d["json"]["data"]["id"] == ev_res.json()["id"]
+    finally:
+        wh_server.shutdown()
+        wh_server.server_close()

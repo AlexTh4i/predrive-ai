@@ -38,6 +38,7 @@ from ..models.models import (
     SessionModel,
     User,
     Vehicle,
+    Webhook,
 )
 from ..schemas.m3 import (
     AckEventRequest,
@@ -48,6 +49,7 @@ from ..schemas.m3 import (
     CreateApiKeyRequest,
     CreateDriverRequest,
     CreatePairingCodeRequest,
+    CreateWebhookRequest,
     DriverDetailResponse,
     DriverFeedbackRequest,
     DriverRankingItem,
@@ -78,6 +80,8 @@ from ..schemas.m3 import (
     SettingsSchema,
     SystemHealthResponse,
     UnregisterPushTokenRequest,
+    WebhookCreatedResponse,
+    WebhookItem,
 )
 from ..services.audit import record_audit_log
 from ..services.mappers import (
@@ -92,6 +96,7 @@ from ..services.mappers import (
     to_vn_time,
 )
 from ..services.sse import sse_broker
+from ..services.webhook_service import seal_webhook_secret
 from ..services.rest_service import find_nearest_rest_stops
 from ..services.risk_report_service import (
     RiskWeights,
@@ -1794,3 +1799,98 @@ def unregister_push_token(
     db.delete(row)
     db.commit()
     return {"deleted": 1}
+
+
+# --- OUTBOUND HMAC WEBHOOKS (MANAGER ONLY - P3-8) ---
+@router.get("/webhooks", response_model=list[WebhookItem])
+def list_webhooks(
+    current_user: User = Depends(require_roles("manager")),
+    db: Session = Depends(get_db),
+) -> list[WebhookItem]:
+    org_id = get_jwt_org_id(current_user)
+    rows = db.scalars(
+        select(Webhook)
+        .where(Webhook.organization_id == org_id)
+        .order_by(Webhook.created_at.desc())
+    ).all()
+    return [
+        WebhookItem(
+            id=w.id,
+            url=w.url,
+            events=list(w.events or []),
+            isActive=bool(w.is_active),
+            createdAt=ensure_utc(w.created_at),  # type: ignore[arg-type]
+        )
+        for w in rows
+    ]
+
+
+@router.post("/webhooks", response_model=WebhookCreatedResponse, status_code=status.HTTP_201_CREATED)
+def create_webhook(
+    payload: CreateWebhookRequest,
+    request: Request,
+    current_user: User = Depends(require_roles("manager")),
+    db: Session = Depends(get_db),
+) -> WebhookCreatedResponse:
+    org_id = get_jwt_org_id(current_user)
+    raw_secret = payload.secret.strip() if payload.secret else f"whsec_{generate_opaque_token()}"
+    sealed = seal_webhook_secret(raw_secret)
+    wh = Webhook(
+        organization_id=org_id,
+        url=payload.url.strip(),
+        secret_hash=sealed,
+        events=list(payload.events),
+        is_active=True,
+    )
+    db.add(wh)
+    db.flush()
+    record_audit_log(
+        db,
+        organization_id=org_id,
+        actor_id=current_user.id,
+        action="create_webhook",
+        entity="webhook",
+        entity_id=wh.id,
+        request=request,
+        meta={"url": wh.url, "events": list(wh.events or [])},
+    )
+    db.commit()
+    db.refresh(wh)
+    return WebhookCreatedResponse(
+        id=wh.id,
+        url=wh.url,
+        events=list(wh.events or []),
+        isActive=bool(wh.is_active),
+        createdAt=ensure_utc(wh.created_at),  # type: ignore[arg-type]
+        secret=raw_secret,
+    )
+
+
+@router.delete("/webhooks/{id}")
+def delete_webhook(
+    id: str,
+    request: Request,
+    current_user: User = Depends(require_roles("manager")),
+    db: Session = Depends(get_db),
+) -> dict[str, str]:
+    org_id = get_jwt_org_id(current_user)
+    wh = db.get(Webhook, id)
+    if wh is None or wh.organization_id != org_id:
+        raise AppError(
+            status.HTTP_404_NOT_FOUND,
+            "WEBHOOK_NOT_FOUND",
+            "Không tìm thấy webhook trong tổ chức",
+        )
+    wh.is_active = False
+    record_audit_log(
+        db,
+        organization_id=org_id,
+        actor_id=current_user.id,
+        action="delete_webhook",
+        entity="webhook",
+        entity_id=wh.id,
+        request=request,
+        meta={"url": wh.url},
+    )
+    db.commit()
+    return {"status": "deactivated", "id": wh.id}
