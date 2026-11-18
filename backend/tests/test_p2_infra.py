@@ -118,3 +118,90 @@ def test_p2_4_prometheus_metrics_grafana_dashboard_and_sentry_capture(
     assert len(captured_envelopes) >= 1
 
 
+def test_p2_5_backup_script_and_restore_drill_on_postgres15(tmp_path: Path):
+    import os
+    import shutil
+    from uuid import uuid4
+    from sqlalchemy import create_engine, text
+
+    assert (ROOT_DIR / "docs" / "backup-restore.md").exists()
+    script_path = ROOT_DIR / "scripts" / "backup.sh"
+    assert script_path.exists()
+
+    git_bash = Path(r"C:\Program Files\Git\bin\bash.exe")
+    bash_bin = str(git_bash) if git_bash.exists() else shutil.which("bash")
+    assert bash_bin is not None
+
+    backup_dir = tmp_path / "backups"
+    env = os.environ.copy()
+    env["DATABASE_URL"] = "postgresql://predrive:predrive_local_dev@127.0.0.1:54329/predrive"
+    env["BACKUP_DIR"] = str(backup_dir.as_posix())
+
+    res = subprocess.run(
+        [bash_bin, str(script_path.as_posix())],
+        cwd=str(ROOT_DIR),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=45,
+    )
+    assert res.returncode == 0, res.stderr
+    assert "predrive_local_dev" not in res.stdout
+    dumps = list(backup_dir.glob("predrive_*.dump"))
+    assert len(dumps) == 1 and dumps[0].stat().st_size > 1000
+    assert (backup_dir / f"{dumps[0].name}.sha256").exists()
+
+    # Restore drill into temporary Postgres 15 database
+    drill_db = f"predrive_drill_{uuid4().hex[:8]}"
+    admin_url = "postgresql+psycopg://predrive:predrive_local_dev@127.0.0.1:54329/postgres"
+    admin_eng = create_engine(admin_url, isolation_level="AUTOCOMMIT")
+    with admin_eng.connect() as conn:
+        conn.execute(text(f'CREATE DATABASE "{drill_db}"'))
+    try:
+        with dumps[0].open("rb") as fh:
+            restore_res = subprocess.run(
+                [
+                    "docker",
+                    "exec",
+                    "-i",
+                    "predrive-pg15",
+                    "pg_restore",
+                    "-U",
+                    "predrive",
+                    "-d",
+                    drill_db,
+                    "--no-owner",
+                    "--no-privileges",
+                ],
+                stdin=fh,
+                capture_output=True,
+                timeout=30,
+            )
+        assert restore_res.returncode == 0, restore_res.stderr.decode("utf-8", errors="ignore")
+
+        drill_eng = create_engine(
+            f"postgresql+psycopg://predrive:predrive_local_dev@127.0.0.1:54329/{drill_db}"
+        )
+        with drill_eng.connect() as dconn:
+            total_t, rls_t = dconn.execute(
+                text(
+                    "SELECT count(*), count(*) FILTER (WHERE rowsecurity) "
+                    "FROM pg_tables WHERE schemaname='public'"
+                )
+            ).one()
+            assert total_t == 22 and rls_t == 22
+        drill_eng.dispose()
+    finally:
+        with admin_eng.connect() as conn:
+            conn.execute(
+                text(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                    "WHERE datname = :db AND pid <> pg_backend_pid()"
+                ),
+                {"db": drill_db},
+            )
+            conn.execute(text(f'DROP DATABASE IF EXISTS "{drill_db}"'))
+        admin_eng.dispose()
+
+
+
