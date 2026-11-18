@@ -14,15 +14,19 @@ def normalize_database_url(raw_url: str) -> str:
     elif url.startswith("postgresql://"):
         url = "postgresql+psycopg://" + url[len("postgresql://") :]
 
-    # Auto-enforce sslmode=require for Supabase cloud hosts if not explicitly set
-    if url.startswith("postgresql") and "supabase.co" in url:
+    # Auto-enforce sslmode=require for Supabase cloud hosts (direct or pooler) if not explicitly set
+    if url.startswith("postgresql") and (
+        "supabase.co" in url or "supabase.com" in url
+    ):
         parts = urlsplit(url)
         q = dict(parse_qsl(parts.query, keep_blank_values=True))
         if "sslmode" not in q:
             q["sslmode"] = "require"
-            url = urlunsplit(
-                (parts.scheme, parts.netloc, parts.path, urlencode(q), parts.fragment)
-            )
+        if ":6543" in parts.netloc:
+            q.pop("pgbouncer", None)
+        url = urlunsplit(
+            (parts.scheme, parts.netloc, parts.path, urlencode(q), parts.fragment)
+        )
     return url
 
 

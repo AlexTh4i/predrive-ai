@@ -210,3 +210,59 @@ def test_p0_2_alembic_and_models_match_schema_sql(
     monkeypatch.setenv("DATABASE_URL", sqlite_url)
     command.upgrade(alembic_cfg, "head")
 
+
+def test_p0_3_supabase_pooler_url_and_full_m3_suite_on_postgres15(
+    isolated_pg_db: str, monkeypatch: pytest.MonkeyPatch
+):
+    from fastapi.testclient import TestClient
+    from sqlalchemy.pool import NullPool
+
+    from app.core import database as db_mod
+    from app.core.config import normalize_database_url
+    from app.main import app
+    from app.services.sse import sse_broker
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "m3_tests_mod", Path(__file__).resolve().parent / "test_m3_backend.py"
+    )
+    assert spec and spec.loader
+    m3_tests = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m3_tests)
+
+    # 1. Verify Supabase URL normalization & pooler handling
+    supa_session_url = normalize_database_url(
+        "postgres://postgres.ref:pwd@aws-0-eu-west-1.pooler.supabase.com:5432/postgres"
+    )
+    assert supa_session_url.startswith("postgresql+psycopg://")
+    assert "sslmode=require" in supa_session_url
+
+    supa_tx_url = (
+        "postgres://postgres.ref:pwd@aws-0-eu-west-1.pooler.supabase.com:6543/postgres?pgbouncer=true"
+    )
+    tx_eng = db_mod.build_engine(supa_tx_url)
+    assert isinstance(tx_eng.pool, NullPool)
+    tx_eng.dispose()
+
+    # 2. Apply schema.sql to isolated_pg_db, then run EVERY M3 integration test on Postgres 15!
+    import psycopg
+
+    raw_psycopg_url = isolated_pg_db.replace("postgresql+psycopg://", "postgresql://")
+    with psycopg.connect(raw_psycopg_url, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(SCHEMA_SQL.read_text(encoding="utf-8"))
+
+    monkeypatch.setenv("DATABASE_URL", isolated_pg_db)
+    monkeypatch.setenv("PREDRIVE_ENABLE_WATCHDOG", "0")
+    db_mod.reset_engine(isolated_pg_db)
+    sse_broker.clear_history()
+
+    with TestClient(app) as pg_client:
+        m3_tests.test_step1_seed_idempotency_and_2am_4am_peak(pg_client)
+        m3_tests.test_step2_auth_rbac_and_org_isolation(pg_client)
+        m3_tests.test_step3_idempotency_out_of_order_events_and_delayed(pg_client)
+        m3_tests.test_step6_heartbeat_watchdog_disconnect_and_auto_recovery(pg_client)
+        m3_tests.test_step7_simulate_driver_and_openapi_contract(pg_client)
+        m3_tests.test_step4_and_step5_web_endpoints_div_by_zero_and_sse(pg_client)
+
+
