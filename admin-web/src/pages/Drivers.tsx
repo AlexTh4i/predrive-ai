@@ -70,8 +70,8 @@ export function Drivers() {
         vehicleName: vehicleName.trim() || undefined,
       });
       const loginName = username.trim() || phone.trim();
-      const loginPass = password || 'driver123';
-      setCreatedInfo(`Đã tạo tài xế ${created.fullName} · Tài khoản: ${loginName} / ${loginPass}`);
+      const loginPass = created.temporaryPassword || password || '(mật khẩu tạm thời)';
+      setCreatedInfo(`Đã tạo tài xế ${created.fullName} · Tài khoản: ${loginName} / ${loginPass} (bắt buộc đổi mật khẩu lần đầu)`);
       setFullName('');
       setPhone('');
       setUsername('');

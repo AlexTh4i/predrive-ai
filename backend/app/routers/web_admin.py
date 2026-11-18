@@ -677,9 +677,16 @@ def create_driver_account(
     current_user: User = Depends(require_roles("manager")),
     db: Session = Depends(get_db),
 ) -> DriverSchema:
+    import secrets
+
     org_id = current_user.organization_id
     username = (payload.username or payload.phone).strip()
-    raw_password = payload.password or "driver123"
+    generated_temp = False
+    if payload.password:
+        raw_password = payload.password
+    else:
+        raw_password = secrets.token_urlsafe(8)[:10]
+        generated_temp = True
 
     existing_user = db.scalar(select(User).where(User.username == username))
     if existing_user is not None:
@@ -716,12 +723,17 @@ def create_driver_account(
         role="driver",
         full_name=payload.fullName.strip(),
         phone=payload.phone.strip(),
+        zalo_phone=payload.phone.strip(),
         vehicle_id=veh_id,
         avatar_url=payload.avatarUrl,
+        must_change_password=True,
     )
     db.add(driver)
     db.commit()
     db.refresh(driver)
 
     vehicle_map = get_vehicle_name_map(db, org_id)
-    return driver_to_schema(driver, vehicle_map)
+    out = driver_to_schema(driver, vehicle_map)
+    if generated_temp:
+        out.temporaryPassword = raw_password
+    return out
