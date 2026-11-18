@@ -313,3 +313,60 @@ class CreateDriverRequest(CamelModel):
     vehicleName: Optional[str] = None
     avatarUrl: Optional[str] = None
 
+
+# --- AUDIT LOGS, API KEYS & REPORTS (P1-4 / P3-6 / P3-8) ---
+class AuditLogItem(CamelModel):
+    id: int
+    organizationId: Optional[str] = None
+    actorId: Optional[str] = None
+    actorName: Optional[str] = None
+    action: str
+    entity: Optional[str] = None
+    entityId: Optional[str] = None
+    ip: Optional[str] = None
+    meta: dict[str, Any] = Field(default_factory=dict)
+    createdAt: UtcDatetime
+
+
+class PaginatedAuditLogsResponse(CamelModel):
+    items: list[AuditLogItem]
+    total: int
+
+
+class CreateApiKeyRequest(CamelModel):
+    name: str = Field(min_length=1, max_length=120)
+    scopes: list[str] = Field(default_factory=lambda: ["events:read", "vehicles:read"])
+
+
+class ApiKeyItem(CamelModel):
+    id: str
+    name: str
+    keyPrefix: str
+    scopes: list[str]
+    lastUsedAt: Optional[UtcDatetime] = None
+    revokedAt: Optional[UtcDatetime] = None
+    createdAt: UtcDatetime
+
+
+class ApiKeyCreatedResponse(ApiKeyItem):
+    rawKey: str
+
+
+class ExportReportRequest(CamelModel):
+    reportType: Literal["weekly", "monthly"] = "weekly"
+    fileFormat: Literal["pdf", "xlsx"] = "pdf"
+    periodStart: Optional[str] = None
+    periodEnd: Optional[str] = None
+
+
+class ReportItem(CamelModel):
+    id: str
+    reportType: Literal["weekly", "monthly"]
+    fileFormat: Literal["pdf", "xlsx"]
+    periodStart: str
+    periodEnd: str
+    status: Literal["pending", "ready", "failed"]
+    storagePath: Optional[str] = None
+    createdAt: UtcDatetime
+
+
