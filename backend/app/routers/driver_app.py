@@ -31,10 +31,13 @@ from ..schemas.m3 import (
     EndSessionRequest,
     HeartbeatRequest,
     HeartbeatResponse,
+    LocationIngestRequest,
+    LocationIngestResponse,
+    LocationInputPoint,
     SessionSchema,
     UpsertEventRequest,
 )
-from ..services.events_service import upsert_session_event
+from ..services.events_service import _resolve_event_uuid, upsert_session_event
 from ..services.mappers import (
     build_live_driver_state,
     ensure_utc,
@@ -289,6 +292,7 @@ def post_session_heartbeat(
         ts=captured_utc,
         lat=payload.location.lat if (allow_loc and payload.location) else None,
         lng=payload.location.lng if (allow_loc and payload.location) else None,
+        speed_kmh=payload.location.speedKmh if (allow_loc and payload.location) else None,
     )
     db.add(hb)
     HEARTBEATS_RECEIVED_TOTAL.inc()
@@ -325,6 +329,8 @@ def post_session_heartbeat(
                 driver_id=current_user.id,
                 lat=payload.location.lat,
                 lng=payload.location.lng,
+                speed_kmh=payload.location.speedKmh,
+                heading_deg=payload.location.headingDeg,
                 ts=loc_at or now,
             )
         )
@@ -346,6 +352,86 @@ def post_session_heartbeat(
         state=sess.current_state,  # type: ignore[arg-type]
         receivedAt=now,
     )
+
+
+@router.post("/{id}/locations", response_model=LocationIngestResponse)
+def post_session_locations(
+    id: str,
+    payload: LocationIngestRequest,
+    current_user: User = Depends(require_roles("driver")),
+    db: Session = Depends(get_db),
+) -> LocationIngestResponse:
+    consent = _require_driver_consent(db, current_user)
+    sess = _get_owned_session(db, id, current_user)
+    enforce_heartbeat_rate_limit(sess.id)
+
+    org_id = get_jwt_org_id(current_user)
+    org_settings = get_or_create_org_settings(db, org_id)
+    allow_loc = bool(org_settings.share_location and consent.location_consent)
+    if not allow_loc:
+        return LocationIngestResponse(accepted=0, shareLocationEnabled=False)
+
+    now = datetime.now(timezone.utc)
+    items: list[LocationInputPoint] = list(payload.points)
+    if payload.lat is not None and payload.lng is not None:
+        items.append(
+            LocationInputPoint(
+                lat=payload.lat,
+                lng=payload.lng,
+                speedKmh=payload.speedKmh,
+                headingDeg=payload.headingDeg,
+                at=payload.at,
+                eventId=payload.eventId,
+            )
+        )
+
+    accepted = 0
+    for pt in items:
+        loc_ts = ensure_utc(pt.at) if pt.at else now
+        linked_ev_id: Optional[str] = None
+        if pt.eventId:
+            candidate_id = _resolve_event_uuid(sess.id, pt.eventId)
+            ev = db.get(EventModel, candidate_id) or db.scalar(
+                select(EventModel).where(
+                    EventModel.session_id == sess.id,
+                    EventModel.organization_id == org_id,
+                    EventModel.client_event_id == pt.eventId,
+                )
+            )
+            if ev is not None and ev.organization_id == org_id:
+                linked_ev_id = ev.id
+                if ev.lat is None or ev.lng is None:
+                    ev.lat = pt.lat
+                    ev.lng = pt.lng
+
+        db.add(
+            LocationModel(
+                organization_id=org_id,
+                session_id=sess.id,
+                vehicle_id=sess.vehicle_id or current_user.vehicle_id,
+                driver_id=current_user.id,
+                lat=pt.lat,
+                lng=pt.lng,
+                speed_kmh=pt.speedKmh,
+                heading_deg=pt.headingDeg,
+                ts=loc_ts,
+                event_id=linked_ev_id,
+            )
+        )
+        accepted += 1
+
+    if accepted > 0:
+        db.commit()
+        live_state = build_live_driver_state(
+            db, current_user, share_location=org_settings.share_location
+        )
+        sse_broker.publish(
+            org_id,
+            "driver_state",
+            live_state.model_dump(mode="json"),
+        )
+
+    return LocationIngestResponse(accepted=accepted, shareLocationEnabled=True)
 
 
 @router.post("/{id}/end", response_model=SessionSchema)

@@ -142,6 +142,7 @@ def event_to_schema(
         vehicleName=vehicle_name,
         type=ev.type,  # type: ignore[arg-type]
         level=ev.level_str,  # type: ignore[arg-type]
+        severityLevel=int(ev.level),
         status=ev.status,  # type: ignore[arg-type]
         state=ev.state,  # type: ignore[arg-type]
         riskScore=ev.risk_score,
@@ -153,6 +154,9 @@ def event_to_schema(
         ackBy=resolved_ack_by,
         ackAt=ensure_utc(ev.ack_at),
         note=ev.note,
+        lat=ev.lat,
+        lng=ev.lng,
+        driverFeedback=ev.driver_feedback,
     )
 
 
@@ -242,6 +246,9 @@ def build_live_driver_state(
                 lat=latest_loc.lat,
                 lng=latest_loc.lng,
                 at=ensure_utc(latest_loc.ts),  # type: ignore[arg-type]
+                speedKmh=latest_loc.speed_kmh,
+                headingDeg=latest_loc.heading_deg,
+                eventId=latest_loc.event_id,
             )
 
     return LiveDriverState(

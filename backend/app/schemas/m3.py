@@ -173,6 +173,11 @@ class UpsertEventRequest(CamelModel):
     startedAt: UtcDatetime
     durationSec: int = Field(ge=0)
     capturedAt: UtcDatetime
+    severityLevel: Optional[int] = Field(default=None, ge=1, le=3)
+    lat: Optional[float] = Field(default=None, ge=-90.0, le=90.0)
+    lng: Optional[float] = Field(default=None, ge=-180.0, le=180.0)
+    speedKmh: Optional[float] = Field(default=None, ge=0.0, le=300.0)
+    headingDeg: Optional[float] = Field(default=None, ge=0.0, le=360.0)
 
 
 class BatchEventsRequest(CamelModel):
@@ -182,7 +187,33 @@ class BatchEventsRequest(CamelModel):
 class HeartbeatLocationInput(CamelModel):
     lat: float = Field(ge=-90.0, le=90.0)
     lng: float = Field(ge=-180.0, le=180.0)
+    speedKmh: Optional[float] = Field(default=None, ge=0.0, le=300.0)
+    headingDeg: Optional[float] = Field(default=None, ge=0.0, le=360.0)
     at: Optional[UtcDatetime] = None
+
+
+class LocationInputPoint(CamelModel):
+    lat: float = Field(ge=-90.0, le=90.0)
+    lng: float = Field(ge=-180.0, le=180.0)
+    speedKmh: Optional[float] = Field(default=None, ge=0.0, le=300.0)
+    headingDeg: Optional[float] = Field(default=None, ge=0.0, le=360.0)
+    at: Optional[UtcDatetime] = None
+    eventId: Optional[str] = None
+
+
+class LocationIngestRequest(CamelModel):
+    lat: Optional[float] = Field(default=None, ge=-90.0, le=90.0)
+    lng: Optional[float] = Field(default=None, ge=-180.0, le=180.0)
+    speedKmh: Optional[float] = Field(default=None, ge=0.0, le=300.0)
+    headingDeg: Optional[float] = Field(default=None, ge=0.0, le=360.0)
+    at: Optional[UtcDatetime] = None
+    eventId: Optional[str] = None
+    points: list[LocationInputPoint] = Field(default_factory=list, max_length=200)
+
+
+class LocationIngestResponse(CamelModel):
+    accepted: int
+    shareLocationEnabled: bool
 
 
 class HeartbeatRequest(CamelModel):
@@ -241,6 +272,9 @@ class LocationPoint(CamelModel):
     lat: float
     lng: float
     at: UtcDatetime
+    speedKmh: Optional[float] = None
+    headingDeg: Optional[float] = None
+    eventId: Optional[str] = None
 
 
 class LiveDriverState(CamelModel):
@@ -265,6 +299,7 @@ class AlertEvent(CamelModel):
     vehicleName: str
     type: EventType
     level: EventLevel
+    severityLevel: Optional[int] = None
     status: EventStatus
     state: ContractState
     riskScore: Optional[float] = None
@@ -276,6 +311,56 @@ class AlertEvent(CamelModel):
     ackBy: Optional[str] = None
     ackAt: Optional[UtcDatetime] = None
     note: Optional[str] = None
+    lat: Optional[float] = None
+    lng: Optional[float] = None
+    driverFeedback: Optional[str] = None
+
+
+class LiveVehicleLocationItem(CamelModel):
+    driverId: str
+    driverName: str
+    vehicleId: Optional[str] = None
+    vehicleName: str
+    state: ContractState
+    sessionId: Optional[str] = None
+    lat: float
+    lng: float
+    speedKmh: Optional[float] = None
+    headingDeg: Optional[float] = None
+    at: UtcDatetime
+
+
+class LocationTrailPoint(CamelModel):
+    lat: float
+    lng: float
+    speedKmh: Optional[float] = None
+    headingDeg: Optional[float] = None
+    at: UtcDatetime
+    eventId: Optional[str] = None
+
+
+class LocationTrailAlertPin(CamelModel):
+    eventId: str
+    type: EventType
+    level: EventLevel
+    severityLevel: int = 2
+    status: EventStatus
+    driverId: str
+    driverName: str
+    vehicleName: str
+    lat: float
+    lng: float
+    occurredAt: UtcDatetime
+    note: Optional[str] = None
+
+
+class LocationTrailResponse(CamelModel):
+    driverId: str
+    driverName: str
+    vehicleName: str
+    sessionId: Optional[str] = None
+    points: list[LocationTrailPoint]
+    alerts: list[LocationTrailAlertPin]
 
 
 class BatchEventsResponse(CamelModel):

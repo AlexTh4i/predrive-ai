@@ -8,7 +8,9 @@ from sqlalchemy.orm import Session
 
 from ..core.errors import AppError
 from ..models.models import (
+    Consent,
     EventModel,
+    LocationModel,
     SessionModel,
     User,
     Vehicle,
@@ -19,6 +21,7 @@ from .mappers import (
     build_live_driver_state,
     ensure_utc,
     event_to_schema,
+    get_or_create_org_settings,
 )
 from .sse import sse_broker
 
@@ -46,6 +49,97 @@ def _resolve_event_uuid(session_id: str, raw_event_id: str) -> str:
         return str(uuid5(NAMESPACE_DNS, f"{session_id}:{raw_event_id}"))
 
 
+def _resolve_incoming_level(payload: UpsertEventRequest) -> int:
+    if payload.severityLevel is not None:
+        return max(1, min(3, int(payload.severityLevel)))
+    return level_str_to_int(payload.level)
+
+
+def _is_location_allowed(db: Session, driver: User) -> bool:
+    org_settings = get_or_create_org_settings(db, driver.organization_id)
+    if not org_settings.share_location:
+        return False
+    consent = db.scalar(
+        select(Consent)
+        .where(
+            Consent.user_id == driver.id,
+            Consent.organization_id == driver.organization_id,
+            Consent.consent_type == "data_processing",
+        )
+        .order_by(Consent.accepted_at.desc())
+    )
+    return bool(consent is not None and consent.location_consent)
+
+
+def _sync_event_location(
+    db: Session,
+    ev: EventModel,
+    session_obj: SessionModel,
+    driver: User,
+    payload: UpsertEventRequest,
+    captured_utc: datetime,
+) -> None:
+    if not _is_location_allowed(db, driver):
+        return
+
+    lat = payload.lat
+    lng = payload.lng
+    speed = payload.speedKmh
+    heading = payload.headingDeg
+
+    if lat is None or lng is None:
+        recent_loc = db.scalar(
+            select(LocationModel)
+            .where(
+                LocationModel.session_id == session_obj.id,
+                LocationModel.organization_id == driver.organization_id,
+            )
+            .order_by(LocationModel.ts.desc(), LocationModel.id.desc())
+        )
+        if recent_loc is not None:
+            lat = recent_loc.lat
+            lng = recent_loc.lng
+            if speed is None:
+                speed = recent_loc.speed_kmh
+            if heading is None:
+                heading = recent_loc.heading_deg
+
+    if lat is None or lng is None:
+        return
+
+    ev.lat = lat
+    ev.lng = lng
+
+    existing_pin = db.scalar(
+        select(LocationModel).where(
+            LocationModel.organization_id == driver.organization_id,
+            LocationModel.event_id == ev.id,
+        )
+    )
+    if existing_pin is not None:
+        existing_pin.lat = lat
+        existing_pin.lng = lng
+        if speed is not None:
+            existing_pin.speed_kmh = speed
+        if heading is not None:
+            existing_pin.heading_deg = heading
+    else:
+        db.add(
+            LocationModel(
+                organization_id=driver.organization_id,
+                session_id=session_obj.id,
+                vehicle_id=ev.vehicle_id or session_obj.vehicle_id or driver.vehicle_id,
+                driver_id=driver.id,
+                lat=lat,
+                lng=lng,
+                speed_kmh=speed,
+                heading_deg=heading,
+                ts=captured_utc,
+                event_id=ev.id,
+            )
+        )
+
+
 def _merge_existing_event(
     existing: EventModel,
     session_obj: SessionModel,
@@ -59,13 +153,13 @@ def _merge_existing_event(
     started_utc = ensure_utc(payload.startedAt) or captured_utc
     incoming_delayed = (now_utc - captured_utc).total_seconds() > 60.0
 
-    incoming_lvl_int = level_str_to_int(payload.level)
+    incoming_lvl_int = _resolve_incoming_level(payload)
     old_lvl_int = existing.level
     metrics = dict(existing.metrics or {})
 
     if incoming_lvl_int > old_lvl_int:
         existing.level = incoming_lvl_int
-        metrics["api_level"] = payload.level
+        metrics["api_level"] = "CRITICAL" if incoming_lvl_int >= 3 else payload.level
         if old_lvl_int < 3 and incoming_lvl_int >= 3:
             session_obj.warning_count = max(0, session_obj.warning_count - 1)
             session_obj.critical_count += 1
@@ -145,7 +239,7 @@ def upsert_session_event(
             )
         ev, incoming_delayed = _merge_existing_event(existing, session_obj, payload, now)
     else:
-        lvl_int = level_str_to_int(payload.level)
+        lvl_int = _resolve_incoming_level(payload)
         try:
             with db.begin_nested():
                 ev = EventModel(
@@ -164,7 +258,7 @@ def upsert_session_event(
                     closed_at=captured_utc if payload.status == "CLOSED" else None,
                     created_at=now,
                     metrics={
-                        "api_level": payload.level,
+                        "api_level": "CRITICAL" if lvl_int >= 3 else payload.level,
                         "state": payload.state,
                         "risk_score": payload.riskScore,
                         "duration_sec": payload.durationSec,
@@ -191,6 +285,8 @@ def upsert_session_event(
                     "Concurrent event conflict",
                 )
             ev, incoming_delayed = _merge_existing_event(existing, session_obj, payload, now)
+
+    _sync_event_location(db, ev, session_obj, driver, payload, captured_utc)
 
     # Update live session state if session is still open and event is recent
     if session_obj.ended_at is None and not incoming_delayed:

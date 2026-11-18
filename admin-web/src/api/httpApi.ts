@@ -173,4 +173,6 @@ export const httpApi: AdminApi = {
   getSystemHealth: (range, signal) => request(`/stats/system-health${queryString(range)}`, { signal }),
   getSettings: (signal) => request('/settings', { signal }),
   updateSettings: (settings) => request('/settings', { method: 'PUT', body: JSON.stringify(settings) }),
+  getLiveLocations: (signal) => request('/locations/live', { signal }),
+  getLocationTrail: (query, signal) => request(`/locations/trail${queryString(query)}`, { signal }),
 };

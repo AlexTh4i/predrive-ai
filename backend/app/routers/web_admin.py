@@ -27,6 +27,7 @@ from ..models.models import (
     AuditLog,
     EventModel,
     HeartbeatModel,
+    LocationModel,
     Pairing,
     ReportModel,
     SessionModel,
@@ -52,6 +53,10 @@ from ..schemas.m3 import (
     HourlyBreakdownItem,
     HourlyCountItem,
     LiveDriverState,
+    LiveVehicleLocationItem,
+    LocationTrailAlertPin,
+    LocationTrailPoint,
+    LocationTrailResponse,
     PaginatedAuditLogsResponse,
     PaginatedEventsResponse,
     PairingCodeResponse,
@@ -1105,4 +1110,245 @@ def get_report_by_id(
         status=rep.status,  # type: ignore[arg-type]
         storagePath=rep.storage_path,
         createdAt=ensure_utc(rep.created_at),  # type: ignore[arg-type]
+    )
+
+
+# --- GPS & FLEET MAP (P3-1) ---
+@router.get("/locations/live", response_model=list[LiveVehicleLocationItem])
+def get_live_vehicle_locations(
+    current_user: User = Depends(require_roles("manager", "dispatcher")),
+    db: Session = Depends(get_db),
+) -> list[LiveVehicleLocationItem]:
+    org_id = get_jwt_org_id(current_user)
+    drivers = db.scalars(
+        select(User)
+        .where(User.organization_id == org_id, User.role == "driver")
+        .order_by(User.full_name.asc())
+    ).all()
+    vehicle_map = get_vehicle_name_map(db, org_id)
+
+    items: list[LiveVehicleLocationItem] = []
+    seen_vehicle_ids: set[str] = set()
+
+    for drv in drivers:
+        latest_loc = db.scalar(
+            select(LocationModel)
+            .where(
+                LocationModel.organization_id == org_id,
+                LocationModel.driver_id == drv.id,
+            )
+            .order_by(LocationModel.ts.desc(), LocationModel.id.desc())
+        )
+        if latest_loc is None and drv.vehicle_id:
+            latest_loc = db.scalar(
+                select(LocationModel)
+                .where(
+                    LocationModel.organization_id == org_id,
+                    LocationModel.vehicle_id == drv.vehicle_id,
+                )
+                .order_by(LocationModel.ts.desc(), LocationModel.id.desc())
+            )
+        if latest_loc is None:
+            continue
+
+        active_sess = db.scalar(
+            select(SessionModel)
+            .where(
+                SessionModel.organization_id == org_id,
+                SessionModel.driver_id == drv.id,
+                SessionModel.ended_at.is_(None),
+            )
+            .order_by(SessionModel.started_at.desc())
+        )
+        v_id = latest_loc.vehicle_id or (active_sess.vehicle_id if active_sess else None) or drv.vehicle_id
+        if v_id:
+            seen_vehicle_ids.add(v_id)
+        v_name = vehicle_map.get(v_id, "Chưa phân xe") if v_id else "Chưa phân xe"
+        state = active_sess.current_state if active_sess else "OFFLINE"
+
+        items.append(
+            LiveVehicleLocationItem(
+                driverId=drv.id,
+                driverName=drv.full_name,
+                vehicleId=v_id,
+                vehicleName=v_name,
+                state=state,  # type: ignore[arg-type]
+                sessionId=active_sess.id if active_sess else latest_loc.session_id,
+                lat=latest_loc.lat,
+                lng=latest_loc.lng,
+                speedKmh=latest_loc.speed_kmh,
+                headingDeg=latest_loc.heading_deg,
+                at=ensure_utc(latest_loc.ts),  # type: ignore[arg-type]
+            )
+        )
+
+    # Also include unassigned vehicles that received hardware tracker GPS pings (P3-8)
+    vehicles = db.scalars(
+        select(Vehicle).where(Vehicle.organization_id == org_id)
+    ).all()
+    for veh in vehicles:
+        if veh.id in seen_vehicle_ids:
+            continue
+        latest_v_loc = db.scalar(
+            select(LocationModel)
+            .where(
+                LocationModel.organization_id == org_id,
+                LocationModel.vehicle_id == veh.id,
+            )
+            .order_by(LocationModel.ts.desc(), LocationModel.id.desc())
+        )
+        if latest_v_loc is None:
+            continue
+        items.append(
+            LiveVehicleLocationItem(
+                driverId=latest_v_loc.driver_id or f"vehicle:{veh.id}",
+                driverName="Thiết bị hành trình",
+                vehicleId=veh.id,
+                vehicleName=veh.name,
+                state="NORMAL",
+                sessionId=latest_v_loc.session_id,
+                lat=latest_v_loc.lat,
+                lng=latest_v_loc.lng,
+                speedKmh=latest_v_loc.speed_kmh,
+                headingDeg=latest_v_loc.heading_deg,
+                at=ensure_utc(latest_v_loc.ts),  # type: ignore[arg-type]
+            )
+        )
+
+    return items
+
+
+@router.get("/locations/trail", response_model=LocationTrailResponse)
+def get_location_trail(
+    driverId: Optional[str] = Query(default=None),
+    sessionId: Optional[str] = Query(default=None),
+    vehicleId: Optional[str] = Query(default=None),
+    from_str: Optional[str] = Query(default=None, alias="from"),
+    to_str: Optional[str] = Query(default=None, alias="to"),
+    limit: int = Query(default=500, ge=1, le=2000),
+    current_user: User = Depends(require_roles("manager", "dispatcher")),
+    db: Session = Depends(get_db),
+) -> LocationTrailResponse:
+    org_id = get_jwt_org_id(current_user)
+    if not driverId and not sessionId and not vehicleId:
+        raise AppError(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "MISSING_FILTER",
+            "Cần cung cấp ít nhất một trong các tham số driverId, sessionId hoặc vehicleId",
+        )
+
+    from_dt = _parse_query_dt(from_str, is_end_of_day=False)
+    to_dt = _parse_query_dt(to_str, is_end_of_day=True)
+
+    driver_obj: Optional[User] = None
+    sess_obj: Optional[SessionModel] = None
+    veh_obj: Optional[Vehicle] = None
+
+    if sessionId:
+        sess_obj = db.get(SessionModel, sessionId)
+        if sess_obj is None or sess_obj.organization_id != org_id:
+            raise AppError(status.HTTP_404_NOT_FOUND, "SESSION_NOT_FOUND", "Không tìm thấy phiên lái")
+        driverId = driverId or sess_obj.driver_id
+        vehicleId = vehicleId or sess_obj.vehicle_id
+
+    if driverId and not driverId.startswith("vehicle:"):
+        driver_obj = db.get(User, driverId)
+        if driver_obj is None or driver_obj.organization_id != org_id:
+            raise AppError(status.HTTP_404_NOT_FOUND, "DRIVER_NOT_FOUND", "Không tìm thấy tài xế")
+        vehicleId = vehicleId or driver_obj.vehicle_id
+
+    if vehicleId:
+        veh_obj = db.get(Vehicle, vehicleId)
+        if veh_obj is None or veh_obj.organization_id != org_id:
+            raise AppError(status.HTTP_404_NOT_FOUND, "VEHICLE_NOT_FOUND", "Không tìm thấy phương tiện")
+
+    loc_filters = [LocationModel.organization_id == org_id]
+    if sessionId:
+        loc_filters.append(LocationModel.session_id == sessionId)
+    elif driver_obj is not None:
+        loc_filters.append(LocationModel.driver_id == driver_obj.id)
+    elif veh_obj is not None:
+        loc_filters.append(LocationModel.vehicle_id == veh_obj.id)
+
+    if from_dt:
+        loc_filters.append(LocationModel.ts >= from_dt)
+    if to_dt:
+        loc_filters.append(LocationModel.ts <= to_dt)
+
+    loc_rows = list(
+        db.scalars(
+            select(LocationModel)
+            .where(*loc_filters)
+            .order_by(LocationModel.ts.desc(), LocationModel.id.desc())
+            .limit(limit)
+        ).all()
+    )
+    loc_rows.reverse()
+
+    points = [
+        LocationTrailPoint(
+            lat=r.lat,
+            lng=r.lng,
+            speedKmh=r.speed_kmh,
+            headingDeg=r.heading_deg,
+            at=ensure_utc(r.ts),  # type: ignore[arg-type]
+            eventId=r.event_id,
+        )
+        for r in loc_rows
+    ]
+
+    # Collect alert pins along the trail (from linked event_ids AND events with lat/lng in scope)
+    ev_filters = [EventModel.organization_id == org_id]
+    if sessionId:
+        ev_filters.append(EventModel.session_id == sessionId)
+    elif driver_obj is not None:
+        ev_filters.append(EventModel.driver_id == driver_obj.id)
+    elif veh_obj is not None:
+        ev_filters.append(EventModel.vehicle_id == veh_obj.id)
+    if from_dt:
+        ev_filters.append(EventModel.occurred_at >= from_dt)
+    if to_dt:
+        ev_filters.append(EventModel.occurred_at <= to_dt)
+
+    ev_rows = db.scalars(
+        select(EventModel)
+        .where(*ev_filters)
+        .order_by(EventModel.occurred_at.asc())
+    ).all()
+
+    loc_by_event_id = {r.event_id: r for r in loc_rows if r.event_id}
+    driver_name = driver_obj.full_name if driver_obj else "Thiết bị hành trình"
+    vehicle_name = veh_obj.name if veh_obj else "Chưa phân xe"
+
+    alerts: list[LocationTrailAlertPin] = []
+    for ev in ev_rows:
+        pin_loc = loc_by_event_id.get(ev.id)
+        lat = ev.lat if ev.lat is not None else (pin_loc.lat if pin_loc else None)
+        lng = ev.lng if ev.lng is not None else (pin_loc.lng if pin_loc else None)
+        if lat is None or lng is None:
+            continue
+        alerts.append(
+            LocationTrailAlertPin(
+                eventId=ev.id,
+                type=ev.type,  # type: ignore[arg-type]
+                level=ev.level_str,  # type: ignore[arg-type]
+                severityLevel=int(ev.level),
+                status=ev.status,  # type: ignore[arg-type]
+                driverId=ev.driver_id,
+                driverName=driver_name,
+                vehicleName=vehicle_name,
+                lat=lat,
+                lng=lng,
+                occurredAt=ensure_utc(ev.occurred_at),  # type: ignore[arg-type]
+                note=ev.note,
+            )
+        )
+
+    return LocationTrailResponse(
+        driverId=driver_obj.id if driver_obj else (driverId or f"vehicle:{vehicleId}"),
+        driverName=driver_name,
+        vehicleName=vehicle_name,
+        sessionId=sessionId or (sess_obj.id if sess_obj else None),
+        points=points,
+        alerts=alerts,
     )

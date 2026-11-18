@@ -273,4 +273,87 @@ export const mockApi: AdminApi = {
     writeStorage(storePrefix + 'settings', settings, 'sessionStorage');
     return { ...settings };
   },
+  async getLiveLocations(signal) {
+    await pause(signal);
+    operator();
+    const basePoints: Array<[number, number, number, number]> = [
+      [10.7769, 106.7009, 68, 45],
+      [10.9574, 106.8426, 74, 62],
+      [11.9404, 108.4583, 55, 30],
+      [15.8801, 108.338, 72, 350],
+      [16.4637, 107.5909, 0, 0],
+      [21.0285, 105.8542, 0, 0],
+    ];
+    return live.map((drv, idx) => {
+      const [baseLat, baseLng, baseSpeed, heading] = basePoints[idx % basePoints.length];
+      const moving = drv.state !== 'OFFLINE' && drv.state !== 'DISCONNECTED';
+      const offset = moving ? (tick % 12) * 0.0025 : 0;
+      return {
+        driverId: drv.driverId,
+        driverName: drv.fullName,
+        vehicleId: `veh-${idx + 1}`,
+        vehicleName: drv.vehicleName,
+        state: drv.state,
+        sessionId: drv.sessionId,
+        lat: Number((baseLat + offset).toFixed(5)),
+        lng: Number((baseLng + offset * 0.8).toFixed(5)),
+        speedKmh: moving ? baseSpeed : 0,
+        headingDeg: heading,
+        at: drv.lastHeartbeatAt ?? new Date().toISOString(),
+      };
+    });
+  },
+  async getLocationTrail(query, signal) {
+    await pause(signal);
+    operator();
+    const targetId = query.driverId || live[0]?.driverId || 'driver-1';
+    const drv = live.find((item) => item.driverId === targetId) ?? live[0];
+    const drvIdx = Math.max(0, live.findIndex((item) => item.driverId === drv.driverId));
+    const baseLat = 10.7769 + drvIdx * 0.45;
+    const baseLng = 106.7009 + drvIdx * 0.35;
+    const now = Date.now();
+    const drvEvents = [...events.values()]
+      .filter((ev) => ev.driverId === drv.driverId)
+      .sort((a, b) => a.capturedAt.localeCompare(b.capturedAt))
+      .slice(-4);
+
+    const points = Array.from({ length: 8 }, (_, step) => {
+      const linkedEvent = step === 3 ? drvEvents[0] : step === 6 ? drvEvents[1] : undefined;
+      return {
+        lat: Number((baseLat + step * 0.012).toFixed(5)),
+        lng: Number((baseLng + step * 0.015).toFixed(5)),
+        speedKmh: 62 + (step % 4) * 5,
+        headingDeg: 42,
+        at: new Date(now - (8 - step) * 180_000).toISOString(),
+        eventId: linkedEvent?.id ?? null,
+      };
+    });
+
+    const alerts = drvEvents.slice(0, 2).map((ev, idx) => {
+      const pt = points[idx === 0 ? 3 : 6];
+      return {
+        eventId: ev.id,
+        type: ev.type,
+        level: ev.level,
+        severityLevel: ev.level === 'CRITICAL' ? 3 : 2,
+        status: ev.status,
+        driverId: ev.driverId,
+        driverName: ev.driverName,
+        vehicleName: ev.vehicleName,
+        lat: ev.lat ?? pt.lat,
+        lng: ev.lng ?? pt.lng,
+        occurredAt: ev.capturedAt,
+        note: ev.note,
+      };
+    });
+
+    return {
+      driverId: drv.driverId,
+      driverName: drv.fullName,
+      vehicleName: drv.vehicleName,
+      sessionId: drv.sessionId,
+      points,
+      alerts,
+    };
+  },
 };

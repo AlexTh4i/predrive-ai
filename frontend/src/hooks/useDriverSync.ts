@@ -130,9 +130,19 @@ function readOptionalLocation(): Promise<HeartbeatLocation | null> {
   return new Promise((resolve) => {
     navigator.geolocation.getCurrentPosition(
       (pos) => {
+        const rawSpeed = pos.coords.speed;
+        const rawHeading = pos.coords.heading;
         resolve({
           lat: pos.coords.latitude,
           lng: pos.coords.longitude,
+          speedKmh:
+            typeof rawSpeed === 'number' && Number.isFinite(rawSpeed) && rawSpeed >= 0
+              ? Math.round(rawSpeed * 3.6 * 10) / 10
+              : null,
+          headingDeg:
+            typeof rawHeading === 'number' && Number.isFinite(rawHeading) && rawHeading >= 0
+              ? Math.round(rawHeading * 10) / 10
+              : null,
           at: new Date(pos.timestamp || Date.now()).toISOString(),
         });
       },
@@ -174,8 +184,10 @@ export function useDriverSync() {
   const sessionRef = useRef<ActiveSessionState | null>(null);
   const latestStateRef = useRef<ContractState>('NORMAL');
   const latestQualityRef = useRef<ImageQuality>('GOOD');
+  const latestLocationRef = useRef<HeartbeatLocation | null>(null);
   const tickTimerRef = useRef<number | null>(null);
   const heartbeatTimerRef = useRef<number | null>(null);
+  const locationTimerRef = useRef<number | null>(null);
   const initialHeartbeatTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -406,9 +418,43 @@ export function useDriverSync() {
       window.clearInterval(heartbeatTimerRef.current);
       heartbeatTimerRef.current = null;
     }
+    if (locationTimerRef.current !== null) {
+      window.clearInterval(locationTimerRef.current);
+      locationTimerRef.current = null;
+    }
     if (initialHeartbeatTimerRef.current !== null) {
       window.clearTimeout(initialHeartbeatTimerRef.current);
       initialHeartbeatTimerRef.current = null;
+    }
+  }, []);
+
+  const sendLocationSample = useCallback(async () => {
+    const sess = sessionRef.current;
+    const currentAuth = authRef.current;
+    const url = serverUrlRef.current;
+    if (!sess || !currentAuth || modeRef.current !== 'online' || !url) return;
+    if (!hasDriverConsent(currentAuth) || currentAuth.user.mustChangePassword) return;
+    if (!sess.settings.shareLocation || currentAuth.locationConsent === false) return;
+
+    const loc = await readOptionalLocation();
+    if (!loc) return;
+    latestLocationRef.current = loc;
+
+    try {
+      await m3Api.postLocations(
+        currentAuth.accessToken,
+        sess.sessionId,
+        {
+          lat: loc.lat,
+          lng: loc.lng,
+          speedKmh: loc.speedKmh ?? null,
+          headingDeg: loc.headingDeg ?? null,
+          at: loc.at ?? new Date().toISOString(),
+        },
+        url,
+      );
+    } catch {
+      // Bỏ qua lỗi mạng tạm thời khi gửi tọa độ định kỳ (tiết kiệm pin)
     }
   }, []);
 
@@ -420,7 +466,11 @@ export function useDriverSync() {
     if (!hasDriverConsent(currentAuth) || currentAuth.user.mustChangePassword) return;
 
     const elapsedSec = Math.max(0, Math.floor((Date.now() - sess.startMs) / 1000));
-    const location = sess.settings.shareLocation ? await readOptionalLocation() : null;
+    const allowLoc = sess.settings.shareLocation && currentAuth.locationConsent !== false;
+    const location = allowLoc ? await readOptionalLocation() : null;
+    if (location) {
+      latestLocationRef.current = location;
+    }
 
     try {
       await m3Api.postHeartbeat(
@@ -467,7 +517,18 @@ export function useDriverSync() {
       if (!hasDriverConsent(currentAuth) || currentAuth?.user.mustChangePassword) {
         return;
       }
-      enqueueEvent(sess.sessionId, sess.startedAt, event);
+      const allowLoc = sess.settings.shareLocation && currentAuth?.locationConsent !== false;
+      const loc = allowLoc ? latestLocationRef.current : null;
+      const enriched: UpsertEventRequest = loc
+        ? {
+            ...event,
+            lat: event.lat ?? loc.lat,
+            lng: event.lng ?? loc.lng,
+            speedKmh: event.speedKmh ?? loc.speedKmh ?? null,
+            headingDeg: event.headingDeg ?? loc.headingDeg ?? null,
+          }
+        : event;
+      enqueueEvent(sess.sessionId, sess.startedAt, enriched);
       refreshPendingCount();
       void flushNow();
     },
@@ -503,6 +564,21 @@ export function useDriverSync() {
       }, ms);
     },
     [sendHeartbeat],
+  );
+
+  const scheduleLocationInterval = useCallback(
+    (shareLocation: boolean, locationIntervalSec: number) => {
+      if (locationTimerRef.current !== null) {
+        window.clearInterval(locationTimerRef.current);
+        locationTimerRef.current = null;
+      }
+      if (!shareLocation) return;
+      const ms = Math.max(5, locationIntervalSec) * 1000;
+      locationTimerRef.current = window.setInterval(() => {
+        void sendLocationSample();
+      }, ms);
+    },
+    [sendLocationSample],
   );
 
   const startSession = useCallback(async () => {
@@ -564,6 +640,10 @@ export function useDriverSync() {
     }
 
     scheduleHeartbeatInterval(sess.settings.heartbeatIntervalSec);
+    scheduleLocationInterval(
+      sess.settings.shareLocation,
+      sess.settings.locationIntervalSec ?? sess.settings.heartbeatIntervalSec,
+    );
     initialHeartbeatTimerRef.current = window.setTimeout(() => {
       void sendHeartbeat();
     }, 1500);
@@ -620,7 +700,7 @@ export function useDriverSync() {
         });
       }
     }, 1000);
-  }, [clearTimers, queueAndFlushEvent, refreshPendingCount, scheduleHeartbeatInterval, sendHeartbeat]);
+  }, [clearTimers, queueAndFlushEvent, refreshPendingCount, scheduleHeartbeatInterval, scheduleLocationInterval, sendHeartbeat]);
 
   const reportAIState = useCallback(
     (result: AnalysisResult | null, isMonitoring: boolean) => {
