@@ -43,6 +43,7 @@ from .routers import auth as auth_router
 from .routers import driver_app as driver_app_router
 from .routers import web_admin as web_admin_router
 from .schemas import AnalysisResult, FrameMessage, SessionResponse
+from .services.rate_limiter import rate_limiter
 from .services.seed import seed_database
 from .services.watchdog import watchdog_loop
 
@@ -96,6 +97,7 @@ driver_app_router.set_legacy_session_creator(_create_legacy_ws_session)
 async def lifespan(_: FastAPI):
     global ai_analyzer
     # 1. Initialize database schema & seed if empty (NEVER seed in production - R5 / P0-4)
+    rate_limiter.reset()
     cfg = get_config()
     db_mod.Base.metadata.create_all(bind=db_mod.engine)
     if not cfg.is_production and os.getenv("PREDRIVE_AUTO_SEED", "1") == "1":
