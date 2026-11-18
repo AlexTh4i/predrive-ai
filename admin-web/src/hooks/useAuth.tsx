@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 import { api, isMock } from '../api';
 import { ApiError, SESSION_EXPIRED, SESSION_REFRESHED } from '../api/contract';
 import { readStorage, writeStorage } from '../lib/storage';
+import { registerWebPushTokenIfConfigured } from '../lib/pushNotifications';
 import type { LoginResult, User } from '../types';
 
 const storageKey = `predrive:${isMock ? 'demo' : 'http'}:access-token`;
@@ -79,6 +80,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       writeStorage(storageKey, session.accessToken, 'sessionStorage');
       writeStorage(refreshStorageKey, session.refreshToken ?? null, 'sessionStorage');
       setUser(session.user);
+      if (!isMock) void registerWebPushTokenIfConfigured(session.accessToken);
     },
     logout() {
       const savedRefresh = readStorage<string | null>(refreshStorageKey, null, 'sessionStorage');

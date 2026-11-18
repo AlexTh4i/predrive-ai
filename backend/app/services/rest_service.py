@@ -12,6 +12,7 @@ from ..models.models import (
     EventModel,
     LocationModel,
     OrgSettings,
+    PushToken,
     RestBreak,
     RestStop,
     SessionModel,
@@ -24,6 +25,7 @@ from .mappers import (
     ensure_utc,
     event_to_schema,
 )
+from .notify import notify_user
 from .sse import sse_broker
 
 
@@ -286,6 +288,23 @@ def evaluate_driving_hours_and_rest_reminder(
             "driver_state",
             live_state.model_dump(mode="json"),
         )
+        # Push reminder to driver's Android/Web device even if app is backgrounded (P3-7)
+        has_drv_push = db.scalar(
+            select(PushToken.id).where(
+                PushToken.organization_id == driver.organization_id,
+                PushToken.user_id == driver.id,
+            )
+        )
+        if has_drv_push is not None:
+            top_stop_name = suggested[0].name if suggested else "trạm dừng gần nhất"
+            notify_user(
+                db=db,
+                recipient=driver,
+                channel="push",
+                title="Nhắc dừng nghỉ lái xe liên tục",
+                body=f"Vui lòng nghỉ tối thiểu {org_settings.min_rest_min} phút tại {top_stop_name}",
+                meta={"sessionId": sess.id, "eventId": existing_ev.id},
+            )
 
     remaining_min = max(0, math.ceil((max_limit_sec - continuous_sec) / 60.0))
     return RestReminderPayload(

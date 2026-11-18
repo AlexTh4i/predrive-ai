@@ -32,6 +32,7 @@ from ..models.models import (
     HeartbeatModel,
     LocationModel,
     Pairing,
+    PushToken,
     ReportModel,
     SessionModel,
     User,
@@ -68,9 +69,12 @@ from ..schemas.m3 import (
     PaginatedAuditLogsResponse,
     PaginatedEventsResponse,
     PairingCodeResponse,
+    PushTokenItem,
+    RegisterPushTokenRequest,
     ReportItem,
     SettingsSchema,
     SystemHealthResponse,
+    UnregisterPushTokenRequest,
 )
 from ..services.audit import record_audit_log
 from ..services.mappers import (
@@ -1559,3 +1563,91 @@ def get_alarm_fatigue_stats_7d(
 
     items.sort(key=lambda x: (-x.falseAlertPct, -x.offPerHour, x.fullName))
     return items
+
+
+# --- FCM PUSH TOKENS (P3-7) ---
+@router.post("/push-tokens", response_model=PushTokenItem, status_code=status.HTTP_201_CREATED)
+def register_push_token(
+    payload: RegisterPushTokenRequest,
+    current_user: User = Depends(require_roles("manager", "dispatcher", "driver")),
+    db: Session = Depends(get_db),
+) -> PushTokenItem:
+    org_id = get_jwt_org_id(current_user)
+    now = datetime.now(timezone.utc)
+    existing = db.scalar(
+        select(PushToken).where(
+            PushToken.user_id == current_user.id,
+            PushToken.fcm_token == payload.fcmToken,
+        )
+    )
+    if existing is not None:
+        existing.organization_id = org_id
+        existing.platform = payload.platform
+        existing.updated_at = now
+        row = existing
+    else:
+        row = PushToken(
+            organization_id=org_id,
+            user_id=current_user.id,
+            fcm_token=payload.fcmToken,
+            platform=payload.platform,
+            updated_at=now,
+        )
+        db.add(row)
+
+    db.commit()
+    db.refresh(row)
+    return PushTokenItem(
+        id=row.id,
+        userId=row.user_id,
+        fcmToken=row.fcm_token,
+        platform=row.platform,  # type: ignore[arg-type]
+        updatedAt=ensure_utc(row.updated_at),  # type: ignore[arg-type]
+    )
+
+
+@router.get("/push-tokens", response_model=list[PushTokenItem])
+def list_my_push_tokens(
+    current_user: User = Depends(require_roles("manager", "dispatcher", "driver")),
+    db: Session = Depends(get_db),
+) -> list[PushTokenItem]:
+    org_id = get_jwt_org_id(current_user)
+    rows = db.scalars(
+        select(PushToken)
+        .where(
+            PushToken.organization_id == org_id,
+            PushToken.user_id == current_user.id,
+        )
+        .order_by(PushToken.updated_at.desc())
+    ).all()
+    return [
+        PushTokenItem(
+            id=r.id,
+            userId=r.user_id,
+            fcmToken=r.fcm_token,
+            platform=r.platform,  # type: ignore[arg-type]
+            updatedAt=ensure_utc(r.updated_at),  # type: ignore[arg-type]
+        )
+        for r in rows
+    ]
+
+
+@router.delete("/push-tokens")
+def unregister_push_token(
+    payload: UnregisterPushTokenRequest,
+    current_user: User = Depends(require_roles("manager", "dispatcher", "driver")),
+    db: Session = Depends(get_db),
+) -> dict[str, int]:
+    org_id = get_jwt_org_id(current_user)
+    row = db.scalar(
+        select(PushToken).where(
+            PushToken.organization_id == org_id,
+            PushToken.user_id == current_user.id,
+            PushToken.fcm_token == payload.fcmToken,
+        )
+    )
+    if row is None:
+        return {"deleted": 0}
+    db.delete(row)
+    db.commit()
+    return {"deleted": 1}

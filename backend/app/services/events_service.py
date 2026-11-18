@@ -13,6 +13,7 @@ from ..models.models import (
     EventModel,
     LocationModel,
     OrgSettings,
+    PushToken,
     SessionModel,
     User,
     Vehicle,
@@ -26,6 +27,7 @@ from .mappers import (
     get_or_create_org_settings,
     to_vn_time,
 )
+from .notify import notify_user
 from .sse import sse_broker
 
 STATUS_RANK: dict[str, int] = {
@@ -391,5 +393,32 @@ def upsert_session_event(
                 "alert",
                 alert_schema.model_dump(mode="json"),
             )
+            # Send background FCM push to operators who have registered push_tokens (closed tab support - P3-7)
+            if ev.level >= 3 and ev.status != "CLOSED":
+                token_owner_ids = set(
+                    db.scalars(
+                        select(PushToken.user_id).where(
+                            PushToken.organization_id == driver.organization_id
+                        )
+                    ).all()
+                )
+                if token_owner_ids:
+                    operators = db.scalars(
+                        select(User).where(
+                            User.organization_id == driver.organization_id,
+                            User.role.in_(("dispatcher", "manager")),
+                            User.is_active.is_(True),
+                            User.id.in_(token_owner_ids),
+                        )
+                    ).all()
+                    for op in operators:
+                        notify_user(
+                            db=db,
+                            recipient=op,
+                            channel="push",
+                            title=f"Cảnh báo khẩn: {driver.full_name}",
+                            body=f"{ev.type} ({vehicle_name})",
+                            meta={"eventId": ev.id, "driverId": driver.id},
+                        )
 
     return alert_schema, incoming_delayed
