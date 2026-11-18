@@ -25,6 +25,8 @@ from ..core.security import (
 from ..models.models import (
     ApiKey,
     AuditLog,
+    Escalation,
+    EscalationPolicy,
     EventModel,
     HeartbeatModel,
     LocationModel,
@@ -47,6 +49,8 @@ from ..schemas.m3 import (
     DriverRankingItem,
     DriverSchema,
     DriverStatsResponse,
+    EscalationItem,
+    EscalationPolicyItem,
     EventLevel,
     EventType,
     ExportReportRequest,
@@ -298,6 +302,17 @@ def acknowledge_event(
     m = dict(ev.metrics or {})
     m["ack_by_name"] = current_user.full_name
     ev.metrics = m
+
+    open_escalations = db.scalars(
+        select(Escalation).where(
+            Escalation.organization_id == current_user.organization_id,
+            Escalation.event_id == ev.id,
+            Escalation.status.in_(("sent", "delivered")),
+        )
+    ).all()
+    for esc in open_escalations:
+        esc.status = "acked"
+
     record_audit_log(
         db,
         organization_id=current_user.organization_id,
@@ -327,6 +342,80 @@ def acknowledge_event(
             ack_schema.model_dump(mode="json"),
         )
     return ack_schema
+
+
+@router.get("/events/{id}/escalations", response_model=list[EscalationItem])
+def list_event_escalations(
+    id: str,
+    current_user: User = Depends(require_roles("manager", "dispatcher")),
+    db: Session = Depends(get_db),
+) -> list[EscalationItem]:
+    org_id = get_jwt_org_id(current_user)
+    ev = db.get(EventModel, id)
+    if ev is None or ev.organization_id != org_id:
+        raise AppError(
+            status.HTTP_404_NOT_FOUND,
+            "EVENT_NOT_FOUND",
+            "Không tìm thấy sự kiện cảnh báo trong tổ chức",
+        )
+    rows = db.scalars(
+        select(Escalation)
+        .where(Escalation.organization_id == org_id, Escalation.event_id == ev.id)
+        .order_by(Escalation.sent_at.asc())
+    ).all()
+    pol_map = {
+        p.id: p
+        for p in db.scalars(
+            select(EscalationPolicy).where(EscalationPolicy.organization_id == org_id)
+        ).all()
+    }
+    usr_map = {
+        u.id: u
+        for u in db.scalars(select(User).where(User.organization_id == org_id)).all()
+    }
+    return [
+        EscalationItem(
+            id=r.id,
+            eventId=r.event_id,
+            policyId=r.policy_id,
+            level=pol_map[r.policy_id].level if r.policy_id in pol_map else None,
+            notifiedUserId=r.notified_user_id,
+            notifiedUserName=usr_map[r.notified_user_id].full_name
+            if r.notified_user_id in usr_map
+            else None,
+            notifiedRole=usr_map[r.notified_user_id].role
+            if r.notified_user_id in usr_map
+            else None,
+            channel=r.channel,
+            status=r.status,
+            sentAt=ensure_utc(r.sent_at),  # type: ignore[arg-type]
+        )
+        for r in rows
+    ]
+
+
+@router.get("/escalation-policies", response_model=list[EscalationPolicyItem])
+def list_escalation_policies(
+    current_user: User = Depends(require_roles("manager", "dispatcher")),
+    db: Session = Depends(get_db),
+) -> list[EscalationPolicyItem]:
+    org_id = get_jwt_org_id(current_user)
+    rows = db.scalars(
+        select(EscalationPolicy)
+        .where(EscalationPolicy.organization_id == org_id)
+        .order_by(EscalationPolicy.level.asc())
+    ).all()
+    return [
+        EscalationPolicyItem(
+            id=p.id,
+            level=int(p.level),
+            afterSeconds=int(p.after_seconds),
+            notifyRole=p.notify_role,  # type: ignore[arg-type]
+            channel=p.channel,  # type: ignore[arg-type]
+            isActive=bool(p.is_active),
+        )
+        for p in rows
+    ]
 
 
 # --- DRIVERS ---

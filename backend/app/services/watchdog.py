@@ -10,6 +10,8 @@ from ..core.config import get_config
 from ..core.database import SessionLocal
 from ..models.models import (
     AuditLog,
+    Escalation,
+    EscalationPolicy,
     EventModel,
     HeartbeatModel,
     LocationModel,
@@ -26,6 +28,7 @@ from .mappers import (
     event_to_schema,
     get_or_create_org_settings,
 )
+from .notify import notify_user
 from .sse import sse_broker
 
 logger = logging.getLogger("predrive.watchdog")
@@ -115,6 +118,176 @@ def check_disconnected_sessions(
                 )
 
     return created_alerts
+
+
+def _ensure_org_escalation_policies(db: Session, org_settings: OrgSettings) -> list[EscalationPolicy]:
+    policies = list(
+        db.scalars(
+            select(EscalationPolicy)
+            .where(
+                EscalationPolicy.organization_id == org_settings.organization_id,
+                EscalationPolicy.is_active.is_(True),
+            )
+            .order_by(EscalationPolicy.level.asc())
+        ).all()
+    )
+    if policies:
+        return policies
+
+    any_existing = db.scalar(
+        select(EscalationPolicy).where(
+            EscalationPolicy.organization_id == org_settings.organization_id
+        )
+    )
+    if any_existing is not None:
+        return []
+
+    base_sec = max(10, int(org_settings.ack_timeout_sec))
+    defaults = [
+        (1, base_sec, "dispatcher", "push"),
+        (2, base_sec * 3, "manager", "push"),
+        (3, base_sec * 5, "manager", "sms"),
+    ]
+    created: list[EscalationPolicy] = []
+    for lvl, after_sec, role_target, chan in defaults:
+        pol = EscalationPolicy(
+            organization_id=org_settings.organization_id,
+            level=lvl,
+            after_seconds=after_sec,
+            notify_role=role_target,
+            channel=chan,
+            is_active=True,
+        )
+        db.add(pol)
+        created.append(pol)
+    db.flush()
+    return created
+
+
+def check_pending_escalations(
+    db: Session, now_utc: datetime | None = None
+) -> list[Escalation]:
+    """Evaluate unacknowledged, non-delayed events exceeding `settings.ack_timeout_sec`
+    (mirrors `v_events_pending_escalation` + progressive `escalation_policies` levels 1..3).
+    Transitions event status to ESCALATED, sends notifications without duplicates, and stops once acked.
+    """
+    now = ensure_utc(now_utc) or datetime.now(timezone.utc)
+    candidates = db.scalars(
+        select(EventModel).where(
+            EventModel.ack_at.is_(None),
+            EventModel.delayed.is_(False),
+            EventModel.status.in_(("OPEN", "ESCALATED")),
+        )
+    ).all()
+
+    settings_cache: dict[str, OrgSettings] = {}
+    policies_cache: dict[str, list[EscalationPolicy]] = {}
+    created_escalations: list[Escalation] = []
+
+    for ev in candidates:
+        occurred = ensure_utc(ev.occurred_at)
+        if occurred is None:
+            continue
+
+        if ev.organization_id not in settings_cache:
+            settings_cache[ev.organization_id] = get_or_create_org_settings(
+                db, ev.organization_id
+            )
+            policies_cache[ev.organization_id] = _ensure_org_escalation_policies(
+                db, settings_cache[ev.organization_id]
+            )
+
+        org_settings = settings_cache[ev.organization_id]
+        waiting_sec = (now - occurred).total_seconds()
+        if waiting_sec < float(org_settings.ack_timeout_sec):
+            continue
+
+        policies = policies_cache[ev.organization_id]
+        driver = db.get(User, ev.driver_id)
+        driver_name = driver.full_name if driver else "Tài xế"
+        vehicle_name = "Chưa phân xe"
+        v_id = ev.vehicle_id or (driver.vehicle_id if driver else None)
+        if v_id:
+            v_obj = db.get(Vehicle, v_id)
+            if v_obj:
+                vehicle_name = v_obj.name
+
+        status_changed = False
+        for pol in policies:
+            required_wait = max(int(org_settings.ack_timeout_sec), int(pol.after_seconds))
+            if waiting_sec < required_wait:
+                continue
+
+            recipients = db.scalars(
+                select(User).where(
+                    User.organization_id == ev.organization_id,
+                    User.role == pol.notify_role,
+                    User.is_active.is_(True),
+                )
+            ).all()
+            for recipient in recipients:
+                already_sent = db.scalar(
+                    select(Escalation).where(
+                        Escalation.event_id == ev.id,
+                        Escalation.policy_id == pol.id,
+                        Escalation.notified_user_id == recipient.id,
+                    )
+                )
+                if already_sent is not None:
+                    continue
+
+                if ev.status == "OPEN":
+                    ev.status = "ESCALATED"
+                    status_changed = True
+                if ev.escalated_at is None:
+                    ev.escalated_at = now
+                    status_changed = True
+
+                title = f"[Leo thang Mức {pol.level}] Chưa liên hệ tài xế {driver_name}"
+                body = (
+                    f"Sự kiện {ev.type} trên xe {vehicle_name} đã chờ {int(waiting_sec)}s "
+                    f"chưa xác nhận liên hệ."
+                )
+                res = notify_user(
+                    db=db,
+                    recipient=recipient,
+                    channel=pol.channel,
+                    title=title,
+                    body=body,
+                    meta={
+                        "eventId": ev.id,
+                        "driverId": ev.driver_id,
+                        "policyLevel": str(pol.level),
+                    },
+                )
+                esc = Escalation(
+                    organization_id=ev.organization_id,
+                    event_id=ev.id,
+                    policy_id=pol.id,
+                    notified_user_id=recipient.id,
+                    channel=res.channel_used if res.delivered else pol.channel,
+                    status="sent" if res.delivered else "failed",
+                    sent_at=now,
+                )
+                db.add(esc)
+                created_escalations.append(esc)
+
+        if status_changed or created_escalations:
+            db.flush()
+        if status_changed:
+            alert_schema = event_to_schema(ev, driver_name, vehicle_name)
+            sse_broker.publish(
+                ev.organization_id,
+                "alert",
+                alert_schema.model_dump(mode="json"),
+            )
+
+    if created_escalations:
+        db.commit()
+        for esc in created_escalations:
+            db.refresh(esc)
+
+    return created_escalations
 
 
 def purge_expired_organization_data(
@@ -229,6 +402,7 @@ async def watchdog_loop(stop_event: asyncio.Event) -> None:
         try:
             with SessionLocal() as db:
                 check_disconnected_sessions(db)
+                check_pending_escalations(db)
                 ticks += 1
                 now_ts = datetime.now(timezone.utc).timestamp()
                 # Run full retention purge once on startup and every 24h thereafter (P2-6)
