@@ -43,6 +43,11 @@ from .routers import auth as auth_router
 from .routers import driver_app as driver_app_router
 from .routers import web_admin as web_admin_router
 from .schemas import AnalysisResult, FrameMessage, SessionResponse
+from .services.observability import (
+    init_sentry_if_configured,
+    record_http_metric,
+    render_prometheus_metrics,
+)
 from .services.rate_limiter import rate_limiter
 from .services.seed import seed_database
 from .services.watchdog import watchdog_loop
@@ -98,6 +103,7 @@ async def lifespan(_: FastAPI):
     global ai_analyzer
     # 1. Initialize database schema & seed if empty (NEVER seed in production - R5 / P0-4)
     rate_limiter.reset()
+    init_sentry_if_configured()
     cfg = get_config()
     db_mod.Base.metadata.create_all(bind=db_mod.engine)
     if not cfg.is_production and os.getenv("PREDRIVE_AUTO_SEED", "1") == "1":
@@ -253,7 +259,12 @@ async def production_security_middleware(request: Request, call_next):
                 too_large, origin, cfg.cors_origins, cfg.is_production
             )
 
+    t_start = time.perf_counter()
     response = await call_next(request)
+    elapsed = time.perf_counter() - t_start
+    route_obj = request.scope.get("route")
+    route_label = getattr(route_obj, "path", request.url.path)
+    record_http_metric(request.method, route_label, response.status_code, elapsed)
     return _apply_security_and_cors_headers(
         response, origin, cfg.cors_origins, cfg.is_production
     )
@@ -267,6 +278,12 @@ app.include_router(web_admin_router.router)
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok", "service": "predrive-backend", "version": "0.1.0"}
+
+
+@app.get("/metrics", include_in_schema=False)
+async def metrics() -> Response:
+    payload, content_type = render_prometheus_metrics()
+    return Response(content=payload, media_type=content_type)
 
 
 def decode_jpeg(encoded: str) -> tuple[bytes, tuple[int, int]]:
