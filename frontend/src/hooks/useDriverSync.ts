@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AnalysisResult } from '../ai/driverAnalyzer';
 import { getServerUrl, setServerUrl as persistServerUrl } from '../config/env';
-import { isTransientSyncError, m3Api, M3ApiError } from '../services/m3Api';
+import { configureM3TokenRefresh, isTransientSyncError, m3Api, M3ApiError } from '../services/m3Api';
 import {
   clearOfflineQueue,
   enqueueEvent,
@@ -175,6 +175,19 @@ export function useDriverSync() {
 
   useEffect(() => {
     authRef.current = auth;
+    configureM3TokenRefresh(auth?.refreshToken ?? null, (rotated) => {
+      const prev = authRef.current;
+      if (!prev) return;
+      const updated: DriverAuthSession = {
+        ...prev,
+        accessToken: rotated.accessToken,
+        refreshToken: rotated.refreshToken ?? prev.refreshToken,
+        user: rotated.user ?? prev.user,
+      };
+      authRef.current = updated;
+      setAuth(updated);
+      writeStoredAuth(updated);
+    });
   }, [auth]);
 
   useEffect(() => {
@@ -273,9 +286,11 @@ export function useDriverSync() {
 
       const nextAuth: DriverAuthSession = {
         accessToken: res.accessToken,
+        refreshToken: res.refreshToken,
         user: res.user,
       };
       authRef.current = nextAuth;
+      configureM3TokenRefresh(res.refreshToken ?? null);
       setAuth(nextAuth);
       writeStoredAuth(nextAuth);
 
@@ -312,6 +327,11 @@ export function useDriverSync() {
   }, []);
 
   const logout = useCallback(() => {
+    const cur = authRef.current;
+    if (cur?.accessToken && serverUrlRef.current) {
+      void m3Api.logout(cur.accessToken, cur.refreshToken, serverUrlRef.current).catch(() => undefined);
+    }
+    configureM3TokenRefresh(null);
     authRef.current = null;
     setAuth(null);
     writeStoredAuth(null);

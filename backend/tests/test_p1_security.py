@@ -136,3 +136,77 @@ def test_p1_1_production_has_no_seed_users_and_manager_created_user_must_change_
             headers=drv_hdr,
         )
         assert ok_sess.status_code == 200
+
+
+def test_p1_2_refresh_token_rotation_hash_revocation_and_reuse_detection(
+    p1_client: TestClient,
+):
+    from app.core.security import hash_token
+    from app.models.models import RefreshToken
+
+    # 1. Login issues 15-minute access token (900s) + opaque refreshToken stored ONLY as SHA-256 hash
+    login_res = p1_client.post(
+        "/api/v1/auth/login",
+        json={"username": "manager", "password": "manager123"},
+    )
+    assert login_res.status_code == 200
+    body = login_res.json()
+    assert body["expiresIn"] == 900
+    rt1 = body["refreshToken"]
+    assert rt1 and len(rt1) >= 32
+
+    with db_mod.SessionLocal() as db:
+        # Raw refresh token must NEVER exist in DB; only its SHA-256 hash
+        assert (
+            db.scalar(select(RefreshToken).where(RefreshToken.token_hash == rt1))
+            is None
+        )
+        row1 = db.scalar(
+            select(RefreshToken).where(RefreshToken.token_hash == hash_token(rt1))
+        )
+        assert row1 is not None
+        assert row1.revoked_at is None
+        family_id = row1.family_id
+
+    # 2. Rotate token rt1 -> gets rt2; rt1 is now marked revoked & replaced_by_id set
+    rot1 = p1_client.post("/api/v1/auth/refresh", json={"refreshToken": rt1})
+    assert rot1.status_code == 200
+    rt2 = rot1.json()["refreshToken"]
+    assert rt2 and rt2 != rt1
+
+    # 3. REUSE DETECTION: Replay already-rotated rt1 -> must return 401 REFRESH_TOKEN_REUSED
+    # AND immediately revoke the entire family (so rt2 ALSO becomes invalid!)
+    replay_res = p1_client.post("/api/v1/auth/refresh", json={"refreshToken": rt1})
+    assert replay_res.status_code == 401
+    assert replay_res.json()["error"]["code"] == "REFRESH_TOKEN_REUSED"
+
+    rt2_after_compromise = p1_client.post(
+        "/api/v1/auth/refresh", json={"refreshToken": rt2}
+    )
+    assert rt2_after_compromise.status_code == 401
+
+    with db_mod.SessionLocal() as db:
+        active_in_family = db.scalars(
+            select(RefreshToken).where(
+                RefreshToken.family_id == family_id,
+                RefreshToken.revoked_at.is_(None),
+            )
+        ).all()
+        assert len(active_in_family) == 0
+
+    # 4. Logout revokes active refresh token
+    login2 = p1_client.post(
+        "/api/v1/auth/login",
+        json={"username": "dispatcher", "password": "dispatcher123"},
+    ).json()
+    disp_hdr = {"Authorization": f"Bearer {login2['accessToken']}"}
+    rt_disp = login2["refreshToken"]
+    logout_res = p1_client.post(
+        "/api/v1/auth/logout", json={"refreshToken": rt_disp}, headers=disp_hdr
+    )
+    assert logout_res.status_code == 200
+    assert (
+        p1_client.post("/api/v1/auth/refresh", json={"refreshToken": rt_disp}).status_code
+        == 401
+    )
+

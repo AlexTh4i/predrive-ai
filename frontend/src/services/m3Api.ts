@@ -32,6 +32,20 @@ export function isTransientSyncError(err: unknown): boolean {
   return true;
 }
 
+let activeRefreshToken: string | null = null;
+let onTokensUpdated: ((data: LoginResponse) => void) | null = null;
+let refreshPromise: Promise<LoginResponse | null> | null = null;
+
+export function configureM3TokenRefresh(
+  refreshToken: string | null,
+  listener?: (data: LoginResponse) => void,
+): void {
+  activeRefreshToken = refreshToken;
+  if (listener) {
+    onTokensUpdated = listener;
+  }
+}
+
 function resolveBaseUrl(overrideUrl?: string): string {
   const base = overrideUrl !== undefined ? normalizeServerUrl(overrideUrl) : getServerUrl();
   if (!base) {
@@ -59,6 +73,36 @@ function parseErrorMessage(body: unknown, status: number, path: string): { messa
   return { message: `Máy chủ trả về lỗi (${status}).` };
 }
 
+async function performRefresh(serverUrl?: string): Promise<LoginResponse | null> {
+  if (!activeRefreshToken) return null;
+  if (refreshPromise) return refreshPromise;
+  const rt = activeRefreshToken;
+
+  refreshPromise = (async () => {
+    try {
+      const res = await requestJson<LoginResponse>(
+        '/api/v1/auth/refresh',
+        {
+          method: 'POST',
+          body: { refreshToken: rt },
+          serverUrl,
+          allowRefresh: false,
+        },
+      );
+      activeRefreshToken = res.refreshToken ?? null;
+      onTokensUpdated?.(res);
+      return res;
+    } catch {
+      activeRefreshToken = null;
+      return null;
+    } finally {
+      refreshPromise = null;
+    }
+  })();
+
+  return refreshPromise;
+}
+
 async function requestJson<T>(
   path: string,
   options: {
@@ -67,12 +111,14 @@ async function requestJson<T>(
     body?: unknown;
     serverUrl?: string;
     timeoutMs?: number;
+    allowRefresh?: boolean;
   } = {},
 ): Promise<T> {
   const base = resolveBaseUrl(options.serverUrl);
   const url = `${base}${path}`;
   const method = options.method ?? 'GET';
   const timeoutMs = options.timeoutMs ?? 8000;
+  const allowRefresh = options.allowRefresh ?? true;
 
   const headers: Record<string, string> = {
     Accept: 'application/json',
@@ -83,6 +129,11 @@ async function requestJson<T>(
   if (options.body !== undefined) {
     headers['Content-Type'] = 'application/json';
   }
+
+  const isAuthNoRetry =
+    path === '/api/v1/auth/login' ||
+    path === '/api/v1/auth/refresh' ||
+    path === '/api/v1/auth/logout';
 
   if (isNativeApp()) {
     let response;
@@ -113,6 +164,17 @@ async function requestJson<T>(
       return parsed as T;
     }
 
+    if (response.status === 401 && allowRefresh && !isAuthNoRetry && activeRefreshToken) {
+      const rotated = await performRefresh(options.serverUrl);
+      if (rotated?.accessToken) {
+        return requestJson<T>(path, {
+          ...options,
+          token: rotated.accessToken,
+          allowRefresh: false,
+        });
+      }
+    }
+
     const { message, code } = parseErrorMessage(parsed, response.status, path);
     throw new M3ApiError(message, response.status, code);
   }
@@ -139,6 +201,17 @@ async function requestJson<T>(
     throw new M3ApiError(msg, 0, 'NETWORK_ERROR');
   }
 
+  if (response.status === 401 && allowRefresh && !isAuthNoRetry && activeRefreshToken) {
+    const rotated = await performRefresh(options.serverUrl);
+    if (rotated?.accessToken) {
+      return requestJson<T>(path, {
+        ...options,
+        token: rotated.accessToken,
+        allowRefresh: false,
+      });
+    }
+  }
+
   const parsed = await response.json().catch(() => null);
   if (response.ok) {
     return parsed as T;
@@ -157,6 +230,40 @@ export const m3Api = {
     return requestJson('/api/v1/auth/login', {
       method: 'POST',
       body: { username, password },
+      serverUrl,
+      allowRefresh: false,
+    });
+  },
+
+  refresh(refreshToken: string, serverUrl?: string): Promise<LoginResponse> {
+    return requestJson('/api/v1/auth/refresh', {
+      method: 'POST',
+      body: { refreshToken },
+      serverUrl,
+      allowRefresh: false,
+    });
+  },
+
+  logout(token: string, refreshToken?: string, serverUrl?: string): Promise<{ status: string }> {
+    return requestJson('/api/v1/auth/logout', {
+      method: 'POST',
+      token,
+      body: { refreshToken },
+      serverUrl,
+      allowRefresh: false,
+    });
+  },
+
+  changePassword(
+    token: string,
+    currentPassword: string,
+    newPassword: string,
+    serverUrl?: string,
+  ): Promise<AuthUser> {
+    return requestJson('/api/v1/auth/change-password', {
+      method: 'POST',
+      token,
+      body: { currentPassword, newPassword },
       serverUrl,
     });
   },
@@ -234,4 +341,3 @@ export const m3Api = {
     });
   },
 };
-
