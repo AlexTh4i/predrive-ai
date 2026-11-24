@@ -29,7 +29,7 @@ if ($port8000Process) {
     Start-Sleep -Seconds 1
 }
 
-$backendCmd = "cd '$root'; `$env:PYTHONPATH = '$root'; & '$pythonExe' -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --reload"
+$backendCmd = "cd '$root'; `$env:PYTHONPATH = '$root'; & '$pythonExe' -m uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload"
 Start-Process powershell -ArgumentList "-NoExit", "-Command", $backendCmd
 
 Start-Sleep -Seconds 2

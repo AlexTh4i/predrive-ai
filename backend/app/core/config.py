@@ -1,10 +1,29 @@
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
 DEFAULT_SQLITE_PATH = BACKEND_DIR / "predrive.db"
+ENV_FILE_PATH = BACKEND_DIR / ".env"
+
+
+def _load_backend_dotenv() -> None:
+    """Load key=value pairs from backend/.env into os.environ if not already set."""
+    if not ENV_FILE_PATH.exists():
+        return
+    for raw_line in ENV_FILE_PATH.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        key = k.strip()
+        val = v.strip().strip('"').strip("'")
+        if key and key not in os.environ and "<YOUR_DB_PASSWORD>" not in val:
+            os.environ[key] = val
+
+
+_load_backend_dotenv()
 
 
 def normalize_database_url(raw_url: str) -> str:
@@ -13,6 +32,21 @@ def normalize_database_url(raw_url: str) -> str:
         url = "postgresql+psycopg://" + url[len("postgres://") :]
     elif url.startswith("postgresql://"):
         url = "postgresql+psycopg://" + url[len("postgresql://") :]
+
+    # Safely URL-encode unescaped special characters (like '@') in password and strip placeholder '<...>'
+    if "://" in url and "@" in url:
+        scheme, rest = url.split("://", 1)
+        path_idx = rest.find("/")
+        authority = rest[:path_idx] if path_idx != -1 else rest
+        tail = rest[path_idx:] if path_idx != -1 else ""
+        if "@" in authority:
+            userinfo, hostport = authority.rsplit("@", 1)
+            if ":" in userinfo:
+                user, raw_pwd = userinfo.split(":", 1)
+                if raw_pwd.startswith("<") and raw_pwd.endswith(">") and len(raw_pwd) > 2:
+                    raw_pwd = raw_pwd[1:-1]
+                enc_pwd = quote(unquote(raw_pwd), safe="")
+                url = f"{scheme}://{user}:{enc_pwd}@{hostport}{tail}"
 
     # Auto-enforce sslmode=require for Supabase cloud hosts (direct or pooler) if not explicitly set
     if url.startswith("postgresql") and (
