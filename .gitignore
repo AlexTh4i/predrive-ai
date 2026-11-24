@@ -34,6 +34,13 @@ frontend/android/app/src/main/assets/public/
 *.db
 *.db-wal
 *.db-shm
+backups/
+backend/data/
+*.dump
+*.dump.sha256
+admin-web/dist/
+admin-web/playwright-report/
+admin-web/test-results/
 
 # --- Thư mục cũ / tạm ---
 temp_backend/

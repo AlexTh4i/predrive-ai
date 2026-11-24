@@ -1,11 +1,13 @@
 import { createParser } from 'eventsource-parser';
-import type { AlertEvent, LiveDriverState } from '../types';
-import { ApiError, SESSION_EXPIRED } from './contract';
+import type { AlertEvent, LiveDriverState, LoginResult } from '../types';
+import { ApiError, SESSION_EXPIRED, SESSION_REFRESHED } from './contract';
 import type { AdminApi } from './contract';
 
 const baseUrl = (import.meta.env.VITE_API_URL || '/api/v1').replace(/\/+$/, '');
 const streamIdleMs = 75_000;
 let accessToken: string | null = null;
+let refreshToken: string | null = null;
+let refreshInFlight: Promise<string | null> | null = null;
 
 function queryString(values: object) {
   const query = new URLSearchParams();
@@ -15,25 +17,67 @@ function queryString(values: object) {
   return query.size ? `?${query}` : '';
 }
 
-async function fetchApi(path: string, init: RequestInit) {
+async function tryRotateToken(): Promise<string | null> {
+  if (!refreshToken) return null;
+  if (refreshInFlight) return refreshInFlight;
+
+  const currentRefresh = refreshToken;
+  refreshInFlight = (async () => {
+    try {
+      const res = await fetch(`${baseUrl}/auth/refresh`, {
+        method: 'POST',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refreshToken: currentRefresh }),
+        cache: 'no-store',
+      });
+      if (!res.ok) {
+        accessToken = null;
+        refreshToken = null;
+        return null;
+      }
+      const data = (await res.json()) as LoginResult;
+      accessToken = data.accessToken;
+      refreshToken = data.refreshToken ?? null;
+      window.dispatchEvent(new CustomEvent(SESSION_REFRESHED, { detail: data }));
+      return accessToken;
+    } catch {
+      return null;
+    } finally {
+      refreshInFlight = null;
+    }
+  })();
+  return refreshInFlight;
+}
+
+async function fetchApi(path: string, init: RequestInit, allowRefresh = true): Promise<Response> {
   const token = accessToken;
+  const isPublicAuth = path === '/auth/login' || path === '/auth/refresh';
   const headers = new Headers(init.headers);
-  if (token && path !== '/auth/login') headers.set('Authorization', `Bearer ${token}`);
+  if (token && !isPublicAuth) headers.set('Authorization', `Bearer ${token}`);
   if (init.body) headers.set('Content-Type', 'application/json');
   const response = await fetch(`${baseUrl}${path}`, { ...init, headers, cache: 'no-store', redirect: 'error' });
   if (response.ok) return response;
 
-  const body = await response.json().catch(() => null);
-  if (response.status === 401 && token && token === accessToken && path !== '/auth/login') {
-    window.dispatchEvent(new Event(SESSION_EXPIRED));
+  if (response.status === 401 && allowRefresh && !isPublicAuth && path !== '/auth/logout') {
+    if (refreshToken) {
+      const nextAccess = await tryRotateToken();
+      if (nextAccess) {
+        return fetchApi(path, init, false);
+      }
+    }
+    if (token) {
+      window.dispatchEvent(new Event(SESSION_EXPIRED));
+    }
   }
+
+  const body = await response.json().catch(() => null);
   const fallbacks: Record<number, string> = {
     401: path === '/auth/login' ? 'Tên đăng nhập hoặc mật khẩu không đúng.' : 'Phiên đăng nhập đã hết hạn.',
     403: 'Tài khoản không có quyền thực hiện thao tác này.',
     404: 'Máy chủ không tìm thấy dữ liệu hoặc chưa hỗ trợ chức năng này.',
   };
   throw new ApiError(
-    fallbacks[response.status] ?? body?.error?.message ?? `Máy chủ trả về lỗi (${response.status}).`,
+    body?.error?.message ?? fallbacks[response.status] ?? `Máy chủ trả về lỗi (${response.status}).`,
     response.status,
     body?.error?.code,
   );
@@ -48,6 +92,23 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 export const httpApi: AdminApi = {
   setAccessToken(token) { accessToken = token; },
+  setRefreshToken(token) { refreshToken = token; },
+  async logout(rt) {
+    const tokenToRevoke = rt ?? refreshToken;
+    try {
+      if (accessToken) {
+        await fetchApi('/auth/logout', {
+          method: 'POST',
+          body: JSON.stringify({ refreshToken: tokenToRevoke ?? undefined }),
+        }, false);
+      }
+    } catch {
+      // Ignore logout network error when clearing client session
+    } finally {
+      accessToken = null;
+      refreshToken = null;
+    }
+  },
   login: (username, password) => request('/auth/login', {
     method: 'POST', body: JSON.stringify({ username, password }),
   }),
@@ -112,4 +173,7 @@ export const httpApi: AdminApi = {
   getSystemHealth: (range, signal) => request(`/stats/system-health${queryString(range)}`, { signal }),
   getSettings: (signal) => request('/settings', { signal }),
   updateSettings: (settings) => request('/settings', { method: 'PUT', body: JSON.stringify(settings) }),
+  getLiveLocations: (signal) => request('/locations/live', { signal }),
+  getLocationTrail: (query, signal) => request(`/locations/trail${queryString(query)}`, { signal }),
+  getAlarmFatigue: (signal) => request('/stats/alarm-fatigue', { signal }),
 };

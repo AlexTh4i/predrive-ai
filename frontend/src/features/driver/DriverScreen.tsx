@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ParrotMascot } from '../../components/ParrotMascot';
 import type { ParrotMood } from '../../components/ParrotMascot';
 import { DriverConnectSheet } from '../../components/DriverConnectSheet';
@@ -24,7 +24,6 @@ export function DriverScreen() {
     flipCamera,
   } = useCamera();
 
-  const { aiStatus, aiError, result, load: loadAI, start: startAI, stop: stopAI } = useDriverAI(videoRef);
   const { isMuted, toggleMute, unlock, startRing, stopRing } = useBellAlarm();
   const {
     auth,
@@ -36,15 +35,45 @@ export function DriverScreen() {
     pendingCount,
     syncStatus,
     syncError,
+    settings,
+    restReminder,
+    lastAlertEvent,
+    submitEventFeedback,
     saveAndTestServer,
     login,
     pairVehicle,
+    acceptConsent,
+    changePassword,
     logout,
     flushNow,
     startSession,
     reportAIState,
     stopSession,
   } = useDriverSync();
+
+  const dynamicThresholds = useMemo(
+    () => ({
+      earThreshold: settings.earThreshold,
+      level1Sec: settings.level1Sec,
+      level2Sec: settings.level2Sec,
+      level3Sec: settings.level3Sec,
+      distractedSec: settings.headPoseSec,
+      tooDarkBrightness: settings.tooDarkThreshold,
+    }),
+    [
+      settings.earThreshold,
+      settings.level1Sec,
+      settings.level2Sec,
+      settings.level3Sec,
+      settings.headPoseSec,
+      settings.tooDarkThreshold,
+    ],
+  );
+
+  const { aiStatus, aiError, result, load: loadAI, start: startAI, stop: stopAI } = useDriverAI(
+    videoRef,
+    dynamicThresholds,
+  );
 
   useWakeLock(isMonitoring && isCameraActive);
 
@@ -54,10 +83,12 @@ export function DriverScreen() {
   }, [loadAI]);
 
   const state = isMonitoring && isCameraActive ? (result?.state ?? 'NORMAL') : 'NOT_EVALUATED';
+  const severityLevel = isMonitoring && isCameraActive ? (result?.severityLevel ?? 0) : 0;
   const imageQuality = result?.imageQuality ?? 'GOOD';
-  const isAlarm = isMonitoring && state === 'CRITICAL';
+  const isAlarm = isMonitoring && (state === 'CRITICAL' || severityLevel >= 3);
+  const shouldRingBell = isMonitoring && severityLevel >= 2;
   const isWarn =
-    isMonitoring && (state === 'DROWSINESS_SIGNS' || state === 'DISTRACTED');
+    isMonitoring && !isAlarm && (state === 'DROWSINESS_SIGNS' || state === 'DISTRACTED');
   const isUnavailable = isMonitoring && state === 'MONITORING_UNAVAILABLE';
 
   // Đồng bộ trạng thái AI & sự kiện lên máy chủ M3 (hoặc hàng đợi offline)
@@ -65,14 +96,14 @@ export function DriverScreen() {
     reportAIState(result, isMonitoring && isCameraActive);
   }, [result, isMonitoring, isCameraActive, reportAIState]);
 
-  // Đồng bộ chuông báo động khi CRITICAL
+  // Đồng bộ chuông báo động từ Mức 2 (chuông cabin) & Mức 3 (nguy hiểm + báo điều hành); Mức 1 chỉ nhắc nhẹ bằng hình ảnh
   useEffect(() => {
-    if (isAlarm) {
+    if (shouldRingBell) {
       startRing();
     } else {
       stopRing();
     }
-  }, [isAlarm, startRing, stopRing]);
+  }, [shouldRingBell, startRing, stopRing]);
 
   const handleToggleMonitoring = useCallback(async () => {
     unlock();
@@ -85,7 +116,10 @@ export function DriverScreen() {
       return;
     }
 
-    if (mode === 'online' && !auth) {
+    if (
+      mode === 'online' &&
+      (!auth || auth.user.mustChangePassword || (!auth.user.hasConsented && !auth.consentedAt))
+    ) {
       setConnectOpen(true);
       return;
     }
@@ -163,12 +197,16 @@ export function DriverScreen() {
     bannerSub = aiError;
     bannerColor = '#E5372B';
   } else if (isAlarm) {
-    bannerTitle = 'Dậy đi bác tài ơi!';
-    bannerSub = 'Bạn đang nhắm mắt khi lái xe';
+    bannerTitle = 'Mức 3 · Dậy đi bác tài ơi!';
+    bannerSub = 'Đã gửi cảnh báo khẩn về trung tâm điều hành';
     bannerColor = '#E5372B';
+  } else if (state === 'DROWSINESS_SIGNS' && severityLevel === 2) {
+    bannerTitle = 'Mức 2 · Chuông cabin: Tỉnh táo lại nhé!';
+    bannerSub = 'Nhắm mắt kéo dài — nên tìm trạm dừng nghỉ';
+    bannerColor = '#E57A1A';
   } else if (state === 'DROWSINESS_SIGNS') {
-    bannerTitle = 'Chíu chíu! Hơi lim dim rồi đó';
-    bannerSub = 'Tấp vào nghỉ chút nhé?';
+    bannerTitle = 'Mức 1 · Nhắc nhẹ: Hơi lim dim rồi đó';
+    bannerSub = 'Chớp mắt và hít thở sâu nhé';
     bannerColor = '#F5A623';
   } else if (state === 'DISTRACTED') {
     bannerTitle = 'Chíu chíu! Nhìn thẳng đường nhé';
@@ -181,6 +219,15 @@ export function DriverScreen() {
         : 'Chưa thấy rõ khuôn mặt trong khung hình';
     bannerSub = 'Hãy chỉnh lại góc điện thoại hoặc ánh sáng';
     bannerColor = '#8A8F93';
+  } else if (isMonitoring && restReminder?.shouldRest) {
+    const topStop = restReminder.suggestedStops[0];
+    bannerTitle = restReminder.overMaxLimit
+      ? `Quá hạn giờ lái liên tục (${restReminder.continuousDrivingMin} phút)`
+      : `Sắp chạm giới hạn lái liên tục (còn ${restReminder.remainingMin} phút)`;
+    bannerSub = topStop
+      ? `Gợi ý dừng nghỉ ${restReminder.minRestMin}p tại: ${topStop.name} (${topStop.distanceKm} km)`
+      : `Hãy dừng nghỉ tối thiểu ${restReminder.minRestMin} phút`;
+    bannerColor = restReminder.overMaxLimit ? '#E5372B' : '#F5A623';
   }
 
   return (
@@ -301,6 +348,32 @@ export function DriverScreen() {
                 </div>
               )}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Nút phản hồi nhanh "Báo đúng / Báo sai" sau mỗi cảnh báo (P3-4) */}
+      {isMonitoring && lastAlertEvent && !isAlarm && (
+        <div
+          className="absolute inset-x-4 z-30 flex justify-center"
+          style={{ bottom: 'calc(max(1.25rem, env(safe-area-inset-bottom)) + 96px)' }}
+        >
+          <div className="inline-flex items-center gap-2 rounded-full bg-white/95 backdrop-blur px-3.5 py-1.5 text-xs grab-shadow">
+            <span className="font-medium text-[#1C1C1C]">Cảnh báo vừa rồi:</span>
+            <button
+              type="button"
+              onClick={() => void submitEventFeedback('correct')}
+              className="cursor-pointer rounded-full bg-[#E5F7ED] px-2.5 py-1 font-semibold text-[#00804A]"
+            >
+              ✓ Báo đúng
+            </button>
+            <button
+              type="button"
+              onClick={() => void submitEventFeedback('false_alarm')}
+              className="cursor-pointer rounded-full bg-[#FDECEA] px-2.5 py-1 font-semibold text-[#E5372B]"
+            >
+              ✕ Báo sai
+            </button>
           </div>
         </div>
       )}
@@ -456,6 +529,8 @@ export function DriverScreen() {
         onSaveAndTestServer={saveAndTestServer}
         onLogin={login}
         onPair={pairVehicle}
+        onAcceptConsent={acceptConsent}
+        onChangePassword={changePassword}
         onLogout={logout}
         onFlushNow={flushNow}
       />

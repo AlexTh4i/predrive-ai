@@ -45,7 +45,12 @@ ContractState = Literal[
 ]
 
 EventType = Literal[
+    "DROWSY",
     "DROWSINESS",
+    "DISTRACTED",
+    "HEAD_DOWN",
+    "TOO_DARK",
+    "NO_FACE",
     "LONG_DRIVING",
     "DISCONNECTED",
     "REST_CLAIM_REJECTED",
@@ -75,11 +80,42 @@ class AuthUserSchema(CamelModel):
     role: UserRole
     fullName: str
     organizationId: str
+    mustChangePassword: bool = False
+    hasConsented: bool = False
+
+
+class ConsentAcceptRequest(CamelModel):
+    version: str = Field(default="2026-01", min_length=1, max_length=32)
+    locationConsent: bool = True
+    clipStorageConsent: bool = False
+
+
+class ConsentStatusResponse(CamelModel):
+    hasConsented: bool
+    version: str
+    locationConsent: bool
+    clipStorageConsent: bool = False
+    acceptedAt: Optional[UtcDatetime] = None
 
 
 class LoginResponse(CamelModel):
     accessToken: str
+    refreshToken: Optional[str] = None
+    expiresIn: int = 900
     user: AuthUserSchema
+
+
+class RefreshTokenRequest(CamelModel):
+    refreshToken: str = Field(min_length=1)
+
+
+class LogoutRequest(CamelModel):
+    refreshToken: Optional[str] = None
+
+
+class ChangePasswordRequest(CamelModel):
+    currentPassword: str = Field(min_length=1)
+    newPassword: str = Field(min_length=8, max_length=128)
 
 
 class PairRequest(CamelModel):
@@ -98,6 +134,22 @@ class SettingsSchema(CamelModel):
     restResetMin: int = Field(default=15, ge=1)
     shareLocation: bool = False
     heartbeatIntervalSec: int = Field(default=30, ge=5)
+    # Extended dynamic thresholds & retention policies per organization (R3 / P2-6 / Phase 3)
+    earThreshold: Optional[float] = Field(default=None, ge=0.05, le=0.6)
+    eyeClosedSec: Optional[float] = Field(default=None, ge=0.2, le=30.0)
+    headPoseSec: Optional[float] = Field(default=None, ge=0.2, le=30.0)
+    tooDarkThreshold: Optional[float] = Field(default=None, ge=1.0, le=150.0)
+    level1Sec: Optional[float] = Field(default=None, ge=0.2, le=30.0)
+    level2Sec: Optional[float] = Field(default=None, ge=0.5, le=60.0)
+    level3Sec: Optional[float] = Field(default=None, ge=1.0, le=120.0)
+    ackTimeoutSec: Optional[int] = Field(default=None, ge=5, le=3600)
+    maxContinuousDriveMin: Optional[int] = Field(default=None, ge=1, le=1440)
+    restReminderBeforeMin: Optional[int] = Field(default=None, ge=1, le=180)
+    locationIntervalSec: Optional[int] = Field(default=None, ge=5, le=600)
+    heartbeatRetentionDays: Optional[int] = Field(default=None, ge=1, le=3650)
+    locationRetentionDays: Optional[int] = Field(default=None, ge=1, le=3650)
+    eventRetentionDays: Optional[int] = Field(default=None, ge=1, le=3650)
+    auditRetentionDays: Optional[int] = Field(default=None, ge=1, le=3650)
 
 
 # --- DRIVER APP ---
@@ -121,6 +173,11 @@ class UpsertEventRequest(CamelModel):
     startedAt: UtcDatetime
     durationSec: int = Field(ge=0)
     capturedAt: UtcDatetime
+    severityLevel: Optional[int] = Field(default=None, ge=1, le=3)
+    lat: Optional[float] = Field(default=None, ge=-90.0, le=90.0)
+    lng: Optional[float] = Field(default=None, ge=-180.0, le=180.0)
+    speedKmh: Optional[float] = Field(default=None, ge=0.0, le=300.0)
+    headingDeg: Optional[float] = Field(default=None, ge=0.0, le=360.0)
 
 
 class BatchEventsRequest(CamelModel):
@@ -130,7 +187,33 @@ class BatchEventsRequest(CamelModel):
 class HeartbeatLocationInput(CamelModel):
     lat: float = Field(ge=-90.0, le=90.0)
     lng: float = Field(ge=-180.0, le=180.0)
+    speedKmh: Optional[float] = Field(default=None, ge=0.0, le=300.0)
+    headingDeg: Optional[float] = Field(default=None, ge=0.0, le=360.0)
     at: Optional[UtcDatetime] = None
+
+
+class LocationInputPoint(CamelModel):
+    lat: float = Field(ge=-90.0, le=90.0)
+    lng: float = Field(ge=-180.0, le=180.0)
+    speedKmh: Optional[float] = Field(default=None, ge=0.0, le=300.0)
+    headingDeg: Optional[float] = Field(default=None, ge=0.0, le=360.0)
+    at: Optional[UtcDatetime] = None
+    eventId: Optional[str] = None
+
+
+class LocationIngestRequest(CamelModel):
+    lat: Optional[float] = Field(default=None, ge=-90.0, le=90.0)
+    lng: Optional[float] = Field(default=None, ge=-180.0, le=180.0)
+    speedKmh: Optional[float] = Field(default=None, ge=0.0, le=300.0)
+    headingDeg: Optional[float] = Field(default=None, ge=0.0, le=360.0)
+    at: Optional[UtcDatetime] = None
+    eventId: Optional[str] = None
+    points: list[LocationInputPoint] = Field(default_factory=list, max_length=200)
+
+
+class LocationIngestResponse(CamelModel):
+    accepted: int
+    shareLocationEnabled: bool
 
 
 class HeartbeatRequest(CamelModel):
@@ -142,10 +225,56 @@ class HeartbeatRequest(CamelModel):
     location: Optional[HeartbeatLocationInput] = None
 
 
+class NearestRestStopItem(CamelModel):
+    id: str
+    name: str
+    stopType: str
+    lat: float
+    lng: float
+    distanceKm: float
+    open24h: bool = False
+    hasTruckParking: bool = True
+
+
+class RestReminderPayload(CamelModel):
+    shouldRest: bool = True
+    overMaxLimit: bool = False
+    continuousDrivingMin: float
+    maxContinuousDriveMin: int
+    minRestMin: int
+    remainingMin: int
+    suggestedStops: list[NearestRestStopItem] = Field(default_factory=list)
+
+
+class RestBreakStartRequest(CamelModel):
+    startedAt: Optional[UtcDatetime] = None
+    lat: Optional[float] = Field(default=None, ge=-90.0, le=90.0)
+    lng: Optional[float] = Field(default=None, ge=-180.0, le=180.0)
+    suggestedStopId: Optional[str] = None
+
+
+class RestBreakEndRequest(CamelModel):
+    endedAt: Optional[UtcDatetime] = None
+
+
+class RestBreakItem(CamelModel):
+    id: str
+    sessionId: Optional[str] = None
+    driverId: str
+    driveMinBefore: int
+    suggestedStopId: Optional[str] = None
+    startedAt: UtcDatetime
+    endedAt: Optional[UtcDatetime] = None
+    restedMin: Optional[float] = None
+    qualifiedReset: Optional[bool] = None
+
+
 class HeartbeatResponse(CamelModel):
     status: str = "ok"
     state: ContractState
     receivedAt: UtcDatetime
+    settings: Optional[SettingsSchema] = None
+    restReminder: Optional[RestReminderPayload] = None
 
 
 class EndSessionSummary(CamelModel):
@@ -153,6 +282,27 @@ class EndSessionSummary(CamelModel):
     warningCount: int = Field(ge=0)
     criticalCount: int = Field(ge=0)
     unavailableSec: int = Field(ge=0)
+    monitoringOffCount: int = Field(default=1, ge=0)
+
+
+class DriverFeedbackRequest(CamelModel):
+    feedback: Literal["correct", "false_alarm"]
+
+
+class SessionUsageReportRequest(CamelModel):
+    monitoredMinutesDelta: int = Field(default=0, ge=0, le=1440)
+    monitoringOffDelta: int = Field(default=0, ge=0, le=500)
+
+
+class DriverUsage7dItem(CamelModel):
+    driverId: str
+    fullName: str
+    monitoredMinutes: int
+    monitoringOffCount: int
+    alertsTotal: int
+    alertsFalse: int
+    offPerHour: float
+    falseAlertPct: float
 
 
 class EndSessionRequest(CamelModel):
@@ -168,6 +318,7 @@ class DriverSchema(CamelModel):
     vehicleId: Optional[str] = None
     vehicleName: str
     avatarUrl: Optional[str] = None
+    temporaryPassword: Optional[str] = None
 
 
 class SessionSchema(CamelModel):
@@ -188,6 +339,9 @@ class LocationPoint(CamelModel):
     lat: float
     lng: float
     at: UtcDatetime
+    speedKmh: Optional[float] = None
+    headingDeg: Optional[float] = None
+    eventId: Optional[str] = None
 
 
 class LiveDriverState(CamelModel):
@@ -212,6 +366,8 @@ class AlertEvent(CamelModel):
     vehicleName: str
     type: EventType
     level: EventLevel
+    severityLevel: Optional[int] = None
+    alertAction: Optional[str] = None
     status: EventStatus
     state: ContractState
     riskScore: Optional[float] = None
@@ -223,6 +379,56 @@ class AlertEvent(CamelModel):
     ackBy: Optional[str] = None
     ackAt: Optional[UtcDatetime] = None
     note: Optional[str] = None
+    lat: Optional[float] = None
+    lng: Optional[float] = None
+    driverFeedback: Optional[str] = None
+
+
+class LiveVehicleLocationItem(CamelModel):
+    driverId: str
+    driverName: str
+    vehicleId: Optional[str] = None
+    vehicleName: str
+    state: ContractState
+    sessionId: Optional[str] = None
+    lat: float
+    lng: float
+    speedKmh: Optional[float] = None
+    headingDeg: Optional[float] = None
+    at: UtcDatetime
+
+
+class LocationTrailPoint(CamelModel):
+    lat: float
+    lng: float
+    speedKmh: Optional[float] = None
+    headingDeg: Optional[float] = None
+    at: UtcDatetime
+    eventId: Optional[str] = None
+
+
+class LocationTrailAlertPin(CamelModel):
+    eventId: str
+    type: EventType
+    level: EventLevel
+    severityLevel: int = 2
+    status: EventStatus
+    driverId: str
+    driverName: str
+    vehicleName: str
+    lat: float
+    lng: float
+    occurredAt: UtcDatetime
+    note: Optional[str] = None
+
+
+class LocationTrailResponse(CamelModel):
+    driverId: str
+    driverName: str
+    vehicleName: str
+    sessionId: Optional[str] = None
+    points: list[LocationTrailPoint]
+    alerts: list[LocationTrailAlertPin]
 
 
 class BatchEventsResponse(CamelModel):
@@ -290,4 +496,150 @@ class CreateDriverRequest(CamelModel):
     vehicleId: Optional[str] = None
     vehicleName: Optional[str] = None
     avatarUrl: Optional[str] = None
+
+
+# --- AUDIT LOGS, API KEYS & REPORTS (P1-4 / P3-6 / P3-8) ---
+class AuditLogItem(CamelModel):
+    id: int
+    organizationId: Optional[str] = None
+    actorId: Optional[str] = None
+    actorName: Optional[str] = None
+    action: str
+    entity: Optional[str] = None
+    entityId: Optional[str] = None
+    ip: Optional[str] = None
+    meta: dict[str, Any] = Field(default_factory=dict)
+    createdAt: UtcDatetime
+
+
+class PaginatedAuditLogsResponse(CamelModel):
+    items: list[AuditLogItem]
+    total: int
+
+
+class CreateApiKeyRequest(CamelModel):
+    name: str = Field(min_length=1, max_length=120)
+    scopes: list[str] = Field(default_factory=lambda: ["events:read", "vehicles:read"])
+
+
+class ApiKeyItem(CamelModel):
+    id: str
+    name: str
+    keyPrefix: str
+    scopes: list[str]
+    lastUsedAt: Optional[UtcDatetime] = None
+    revokedAt: Optional[UtcDatetime] = None
+    createdAt: UtcDatetime
+
+
+class ApiKeyCreatedResponse(ApiKeyItem):
+    rawKey: str
+
+
+class ExportReportRequest(CamelModel):
+    reportType: Literal["weekly", "monthly"] = "weekly"
+    fileFormat: Literal["pdf", "xlsx"] = "pdf"
+    periodStart: Optional[str] = None
+    periodEnd: Optional[str] = None
+
+
+class ReportItem(CamelModel):
+    id: str
+    reportType: Literal["weekly", "monthly"]
+    fileFormat: Literal["pdf", "xlsx"]
+    periodStart: str
+    periodEnd: str
+    status: Literal["pending", "ready", "failed"]
+    storagePath: Optional[str] = None
+    createdAt: UtcDatetime
+
+
+class EscalationPolicyItem(CamelModel):
+    id: str
+    level: int = Field(ge=1, le=3)
+    afterSeconds: int = Field(ge=5)
+    notifyRole: UserRole
+    channel: Literal["push", "sms", "zalo", "call"]
+    isActive: bool = True
+
+
+class EscalationItem(CamelModel):
+    id: str
+    eventId: str
+    policyId: Optional[str] = None
+    level: Optional[int] = None
+    notifiedUserId: Optional[str] = None
+    notifiedUserName: Optional[str] = None
+    notifiedRole: Optional[str] = None
+    channel: str
+    status: str
+    sentAt: UtcDatetime
+
+
+class RegisterPushTokenRequest(CamelModel):
+    fcmToken: str = Field(min_length=8, max_length=4096)
+    platform: Literal["android", "ios", "web"] = "web"
+
+
+class UnregisterPushTokenRequest(CamelModel):
+    fcmToken: str = Field(min_length=1, max_length=4096)
+
+
+class PushTokenItem(CamelModel):
+    id: str
+    userId: str
+    fcmToken: str
+    platform: Literal["android", "ios", "web"]
+    updatedAt: UtcDatetime
+
+
+class RiskWeightsInput(CamelModel):
+    wCritical: Optional[float] = Field(default=None, ge=0.0, le=100.0)
+    wDrowsy: Optional[float] = Field(default=None, ge=0.0, le=100.0)
+    wDistraction: Optional[float] = Field(default=None, ge=0.0, le=100.0)
+    wOvertime: Optional[float] = Field(default=None, ge=0.0, le=100.0)
+    shiftHoursNorm: Optional[float] = Field(default=None, ge=1.0, le=24.0)
+
+
+class RecomputeRiskScoresRequest(CamelModel):
+    periodType: Literal["shift", "weekly", "monthly"] = "weekly"
+    periodStart: Optional[str] = None
+    periodEnd: Optional[str] = None
+    weights: Optional[RiskWeightsInput] = None
+
+
+class RiskScoreItem(CamelModel):
+    id: str
+    driverId: str
+    driverName: str
+    periodType: Literal["shift", "weekly", "monthly"]
+    periodStart: str
+    periodEnd: str
+    score: int
+    riskLevel: Literal["low", "medium", "high"]
+    eventsCount: int
+    drowsyEvents: int
+    distractionEvents: int
+    drivingHours: float
+
+
+class CreateWebhookRequest(CamelModel):
+    url: str = Field(min_length=8, max_length=1024)
+    events: list[Literal["alert.created", "alert.escalated"]] = Field(
+        default_factory=lambda: ["alert.created", "alert.escalated"], min_length=1
+    )
+    secret: Optional[str] = Field(default=None, min_length=16, max_length=256)
+
+
+class WebhookItem(CamelModel):
+    id: str
+    url: str
+    events: list[str]
+    isActive: bool
+    createdAt: UtcDatetime
+
+
+class WebhookCreatedResponse(WebhookItem):
+    secret: str
+
 

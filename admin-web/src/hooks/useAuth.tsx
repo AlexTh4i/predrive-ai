@@ -1,11 +1,13 @@
 import { createContext, useContext, useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import { api, isMock } from '../api';
-import { ApiError, SESSION_EXPIRED } from '../api/contract';
+import { ApiError, SESSION_EXPIRED, SESSION_REFRESHED } from '../api/contract';
 import { readStorage, writeStorage } from '../lib/storage';
-import type { User } from '../types';
+import { registerWebPushTokenIfConfigured } from '../lib/pushNotifications';
+import type { LoginResult, User } from '../types';
 
 const storageKey = `predrive:${isMock ? 'demo' : 'http'}:access-token`;
+const refreshStorageKey = `predrive:${isMock ? 'demo' : 'http'}:refresh-token`;
 const allowed = (user: User) => user.role === 'manager' || user.role === 'dispatcher';
 
 interface Auth {
@@ -19,7 +21,9 @@ const AuthContext = createContext<Auth | null>(null);
 
 function clearSession() {
   api.setAccessToken(null);
+  api.setRefreshToken?.(null);
   writeStorage(storageKey, null, 'sessionStorage');
+  writeStorage(refreshStorageKey, null, 'sessionStorage');
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -31,10 +35,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       clearSession();
       setUser(null);
     };
+    const refreshed = (ev: Event) => {
+      const detail = (ev as CustomEvent<LoginResult>).detail;
+      if (detail?.accessToken) {
+        writeStorage(storageKey, detail.accessToken, 'sessionStorage');
+        writeStorage(refreshStorageKey, detail.refreshToken ?? null, 'sessionStorage');
+        if (detail.user && allowed(detail.user)) {
+          setUser(detail.user);
+        }
+      }
+    };
     window.addEventListener(SESSION_EXPIRED, expired);
+    window.addEventListener(SESSION_REFRESHED, refreshed);
+
     const token = readStorage<string | null>(storageKey, null, 'sessionStorage');
+    const savedRefresh = readStorage<string | null>(refreshStorageKey, null, 'sessionStorage');
     if (token) {
       api.setAccessToken(token);
+      api.setRefreshToken?.(savedRefresh);
       api.me(controller.signal).then((current) => {
         if (controller.signal.aborted) return;
         if (allowed(current)) setUser(current);
@@ -48,6 +66,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => {
       controller.abort();
       window.removeEventListener(SESSION_EXPIRED, expired);
+      window.removeEventListener(SESSION_REFRESHED, refreshed);
     };
   }, []);
 
@@ -57,10 +76,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const session = await api.login(username, password);
       if (!allowed(session.user)) throw new ApiError('Tài khoản tài xế không có quyền truy cập bảng điều hành.', 403);
       api.setAccessToken(session.accessToken);
+      api.setRefreshToken?.(session.refreshToken ?? null);
       writeStorage(storageKey, session.accessToken, 'sessionStorage');
+      writeStorage(refreshStorageKey, session.refreshToken ?? null, 'sessionStorage');
       setUser(session.user);
+      if (!isMock) void registerWebPushTokenIfConfigured(session.accessToken);
     },
     logout() {
+      const savedRefresh = readStorage<string | null>(refreshStorageKey, null, 'sessionStorage');
+      void api.logout?.(savedRefresh);
       clearSession();
       setUser(null);
     },

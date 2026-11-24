@@ -11,6 +11,9 @@ export const ON_DEVICE_MODEL_VERSION = 'on-device-mediapipe-v0.1';
 /** Ngưỡng — trùng với DriverMonitorAI trong ai/inference/analyzer.py và quality.py */
 export const AI_CONFIG = {
   earThreshold: 0.28,
+  level1Sec: 1.0,
+  level2Sec: 2.0,
+  level3Sec: 4.0,
   drowsyWarningSec: 1.0,
   drowsyCriticalSec: 2.0,
   distractedSec: 1.8,
@@ -18,12 +21,23 @@ export const AI_CONFIG = {
   lowLightBrightness: 45,
 } as const;
 
+export interface AnalyzerThresholds {
+  earThreshold: number;
+  level1Sec: number;
+  level2Sec: number;
+  level3Sec: number;
+  distractedSec: number;
+  tooDarkBrightness: number;
+}
+
 const LEFT_EYE = [33, 160, 158, 133, 153, 144] as const;
 const RIGHT_EYE = [362, 385, 387, 263, 373, 380] as const;
 
 export interface AnalysisResult {
   state: DriverState;
   alertLevel: AlertLevel;
+  /** 0 = bình thường, 1 = nhắc nhẹ, 2 = chuông cabin, 3 = nguy hiểm & báo điều hành */
+  severityLevel: 0 | 1 | 2 | 3;
   faceVisible: boolean;
   imageQuality: ImageQuality;
   /** EAR trung bình hai mắt (chỉ dùng để debug, không hiển thị cho tài xế) */
@@ -64,6 +78,14 @@ export class DriverAnalyzer {
   private distractedSince: number | null = null;
   private qualityCanvas: HTMLCanvasElement;
   private qualityCtx: CanvasRenderingContext2D | null;
+  private thresholds: AnalyzerThresholds = {
+    earThreshold: AI_CONFIG.earThreshold,
+    level1Sec: AI_CONFIG.level1Sec,
+    level2Sec: AI_CONFIG.level2Sec,
+    level3Sec: AI_CONFIG.level3Sec,
+    distractedSec: AI_CONFIG.distractedSec,
+    tooDarkBrightness: AI_CONFIG.tooDarkBrightness,
+  };
 
   private constructor(landmarker: FaceLandmarker) {
     this.landmarker = landmarker;
@@ -94,6 +116,17 @@ export class DriverAnalyzer {
     this.distractedSince = null;
   }
 
+  updateThresholds(next: Partial<AnalyzerThresholds>): void {
+    this.thresholds = {
+      earThreshold: next.earThreshold ?? this.thresholds.earThreshold,
+      level1Sec: next.level1Sec ?? this.thresholds.level1Sec,
+      level2Sec: next.level2Sec ?? this.thresholds.level2Sec,
+      level3Sec: next.level3Sec ?? this.thresholds.level3Sec,
+      distractedSec: next.distractedSec ?? this.thresholds.distractedSec,
+      tooDarkBrightness: next.tooDarkBrightness ?? this.thresholds.tooDarkBrightness,
+    };
+  }
+
   close(): void {
     this.landmarker.close();
   }
@@ -108,7 +141,7 @@ export class DriverAnalyzer {
       sum += 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
     }
     const mean = sum / (data.length / 4);
-    if (mean < AI_CONFIG.tooDarkBrightness) return 'TOO_DARK';
+    if (mean < this.thresholds.tooDarkBrightness) return 'TOO_DARK';
     if (mean < AI_CONFIG.lowLightBrightness) return 'LOW_LIGHT';
     return 'GOOD';
   }
@@ -118,6 +151,7 @@ export class DriverAnalyzer {
     return {
       state: 'MONITORING_UNAVAILABLE',
       alertLevel: 'NONE',
+      severityLevel: 0,
       faceVisible,
       imageQuality: quality,
       ear: null,
@@ -156,7 +190,7 @@ export class DriverAnalyzer {
     const ear =
       (eyeAspectRatio(landmarks, LEFT_EYE, w, h) + eyeAspectRatio(landmarks, RIGHT_EYE, w, h)) / 2;
 
-    if (ear < AI_CONFIG.earThreshold) {
+    if (ear < this.thresholds.earThreshold) {
       if (this.eyeClosedSince === null) this.eyeClosedSince = nowSec;
     } else {
       this.eyeClosedSince = null;
@@ -173,20 +207,30 @@ export class DriverAnalyzer {
 
     let state: DriverState = 'NORMAL';
     let alertLevel: AlertLevel = 'NONE';
-    if (closedFor >= AI_CONFIG.drowsyCriticalSec) {
+    let severityLevel: 0 | 1 | 2 | 3 = 0;
+
+    if (closedFor >= this.thresholds.level3Sec) {
       state = 'CRITICAL';
       alertLevel = 'CRITICAL';
-    } else if (closedFor >= AI_CONFIG.drowsyWarningSec) {
+      severityLevel = 3;
+    } else if (closedFor >= this.thresholds.level2Sec) {
       state = 'DROWSINESS_SIGNS';
       alertLevel = 'WARNING';
-    } else if (distractedFor >= AI_CONFIG.distractedSec) {
+      severityLevel = 2;
+    } else if (closedFor >= this.thresholds.level1Sec) {
+      state = 'DROWSINESS_SIGNS';
+      alertLevel = 'INFO';
+      severityLevel = 1;
+    } else if (distractedFor >= this.thresholds.distractedSec) {
       state = 'DISTRACTED';
       alertLevel = 'WARNING';
+      severityLevel = distractedFor >= this.thresholds.level2Sec ? 2 : 1;
     }
 
     return {
       state,
       alertLevel,
+      severityLevel,
       faceVisible: true,
       imageQuality: quality,
       ear: Math.round(ear * 1000) / 1000,

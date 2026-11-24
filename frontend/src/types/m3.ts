@@ -20,10 +20,22 @@ export interface AuthUser {
   role: Role;
   fullName: string;
   organizationId: string;
+  mustChangePassword?: boolean;
+  hasConsented?: boolean;
+}
+
+export interface ConsentStatusResponse {
+  hasConsented: boolean;
+  version: string;
+  locationConsent: boolean;
+  clipStorageConsent: boolean;
+  acceptedAt?: string | null;
 }
 
 export interface LoginResponse {
   accessToken: string;
+  refreshToken?: string;
+  expiresIn?: number;
   user: AuthUser;
 }
 
@@ -38,6 +50,16 @@ export interface DriverSettings {
   restResetMin: number;
   shareLocation: boolean;
   heartbeatIntervalSec: number;
+  locationIntervalSec?: number;
+  earThreshold?: number;
+  eyeClosedSec?: number;
+  headPoseSec?: number;
+  tooDarkThreshold?: number;
+  level1Sec?: number;
+  level2Sec?: number;
+  level3Sec?: number;
+  maxContinuousDriveMin?: number;
+  restReminderBeforeMin?: number;
 }
 
 export const DEFAULT_DRIVER_SETTINGS: DriverSettings = {
@@ -46,6 +68,16 @@ export const DEFAULT_DRIVER_SETTINGS: DriverSettings = {
   restResetMin: 15,
   shareLocation: false,
   heartbeatIntervalSec: 30,
+  locationIntervalSec: 30,
+  earThreshold: 0.28,
+  eyeClosedSec: 1.0,
+  headPoseSec: 1.8,
+  tooDarkThreshold: 20.0,
+  level1Sec: 1.0,
+  level2Sec: 2.0,
+  level3Sec: 4.0,
+  maxContinuousDriveMin: 240,
+  restReminderBeforeMin: 15,
 };
 
 export interface CreateSessionResponse {
@@ -57,12 +89,17 @@ export interface UpsertEventRequest {
   eventId: string;
   type: EventType;
   level: EventLevel;
+  severityLevel?: number;
   status: EventStatus;
   state: ContractState;
   riskScore: number | null;
   startedAt: string;
   durationSec: number;
   capturedAt: string;
+  lat?: number | null;
+  lng?: number | null;
+  speedKmh?: number | null;
+  headingDeg?: number | null;
 }
 
 export interface AlertEventResponse {
@@ -94,7 +131,24 @@ export interface BatchEventsResponse {
 export interface HeartbeatLocation {
   lat: number;
   lng: number;
+  speedKmh?: number | null;
+  headingDeg?: number | null;
   at?: string;
+}
+
+export interface LocationIngestPayload {
+  lat?: number;
+  lng?: number;
+  speedKmh?: number | null;
+  headingDeg?: number | null;
+  at?: string;
+  eventId?: string;
+  points?: Array<HeartbeatLocation & { eventId?: string }>;
+}
+
+export interface LocationIngestResponse {
+  accepted: number;
+  shareLocationEnabled: boolean;
 }
 
 export interface HeartbeatRequest {
@@ -106,10 +160,33 @@ export interface HeartbeatRequest {
   location?: HeartbeatLocation | null;
 }
 
+export interface NearestRestStopItem {
+  id: string;
+  name: string;
+  stopType: string;
+  lat: number;
+  lng: number;
+  distanceKm: number;
+  open24h?: boolean;
+  hasTruckParking?: boolean;
+}
+
+export interface RestReminderPayload {
+  shouldRest: boolean;
+  overMaxLimit: boolean;
+  continuousDrivingMin: number;
+  maxContinuousDriveMin: number;
+  minRestMin: number;
+  remainingMin: number;
+  suggestedStops: NearestRestStopItem[];
+}
+
 export interface HeartbeatResponse {
   status: string;
   state: ContractState;
   receivedAt: string;
+  settings?: DriverSettings;
+  restReminder?: RestReminderPayload | null;
 }
 
 export interface EndSessionRequest {
@@ -119,8 +196,11 @@ export interface EndSessionRequest {
     warningCount: number;
     criticalCount: number;
     unavailableSec: number;
+    monitoringOffCount?: number;
   };
 }
+
+export type DriverFeedbackValue = 'correct' | 'false_alarm';
 
 export interface SessionSummaryResponse {
   id: string;
@@ -136,9 +216,12 @@ export type DriverMode = 'online' | 'offline_demo';
 
 export interface DriverAuthSession {
   accessToken: string;
+  refreshToken?: string;
   user: AuthUser;
   vehicleName?: string;
   organizationName?: string;
   consentedAt?: string;
+  consentVersion?: string;
+  locationConsent?: boolean;
 }
 

@@ -47,15 +47,13 @@ def vn_day_bounds_utc(ref_utc: datetime | None = None) -> tuple[datetime, dateti
 
 
 def get_or_create_org_settings(db: Session, org_id: str) -> OrgSettings:
-    settings = db.scalar(
-        select(OrgSettings).where(OrgSettings.organization_id == org_id)
-    )
+    settings = db.get(OrgSettings, org_id)
     if settings is None:
         settings = OrgSettings(
             organization_id=org_id,
             continuous_warn_sec=7200,
             continuous_critical_sec=10800,
-            rest_reset_min=15,
+            min_rest_min=15,
             share_location=False,
             heartbeat_interval_sec=30,
         )
@@ -69,9 +67,24 @@ def settings_to_schema(settings: OrgSettings) -> SettingsSchema:
     return SettingsSchema(
         continuousWarnSec=settings.continuous_warn_sec,
         continuousCriticalSec=settings.continuous_critical_sec,
-        restResetMin=settings.rest_reset_min,
+        restResetMin=settings.min_rest_min,
         shareLocation=settings.share_location,
         heartbeatIntervalSec=settings.heartbeat_interval_sec,
+        earThreshold=round(float(settings.ear_threshold), 4),
+        eyeClosedSec=round(float(settings.eye_closed_sec), 2),
+        headPoseSec=round(float(settings.head_pose_sec), 2),
+        tooDarkThreshold=round(float(settings.too_dark_threshold), 2),
+        level1Sec=round(float(settings.level1_sec), 2),
+        level2Sec=round(float(settings.level2_sec), 2),
+        level3Sec=round(float(settings.level3_sec), 2),
+        ackTimeoutSec=settings.ack_timeout_sec,
+        maxContinuousDriveMin=settings.max_continuous_drive_min,
+        restReminderBeforeMin=settings.rest_reminder_before_min,
+        locationIntervalSec=settings.location_interval_sec,
+        heartbeatRetentionDays=settings.heartbeat_retention_days,
+        locationRetentionDays=settings.location_retention_days,
+        eventRetentionDays=settings.event_retention_days,
+        auditRetentionDays=settings.audit_retention_days,
     )
 
 
@@ -93,7 +106,7 @@ def driver_to_schema(
     return DriverSchema(
         id=driver.id,
         fullName=driver.full_name,
-        phone=driver.phone,
+        phone=driver.phone or "",
         vehicleId=driver.vehicle_id,
         vehicleName=v_name,
         avatarUrl=driver.avatar_url,
@@ -116,7 +129,19 @@ def event_to_schema(
     ev: EventModel,
     driver_name: str,
     vehicle_name: str,
+    ack_by_name: str | None = None,
 ) -> AlertEvent:
+    resolved_ack_by = ack_by_name
+    if resolved_ack_by is None and ev.metrics:
+        resolved_ack_by = ev.metrics.get("ack_by_name")
+    alert_action = (ev.metrics or {}).get("alert_action")
+    if not alert_action:
+        if ev.level >= 3:
+            alert_action = "notify_dispatcher"
+        elif ev.level == 2:
+            alert_action = "cabin_bell"
+        else:
+            alert_action = "gentle_reminder"
     return AlertEvent(
         id=ev.id,
         sessionId=ev.session_id,
@@ -124,18 +149,23 @@ def event_to_schema(
         driverName=driver_name,
         vehicleName=vehicle_name,
         type=ev.type,  # type: ignore[arg-type]
-        level=ev.level,  # type: ignore[arg-type]
+        level=ev.level_str,  # type: ignore[arg-type]
+        severityLevel=int(ev.level),
+        alertAction=alert_action,
         status=ev.status,  # type: ignore[arg-type]
         state=ev.state,  # type: ignore[arg-type]
         riskScore=ev.risk_score,
-        startedAt=ensure_utc(ev.started_at),  # type: ignore[arg-type]
+        startedAt=ensure_utc(ev.occurred_at),  # type: ignore[arg-type]
         durationSec=ev.duration_sec,
         delayed=ev.delayed,
         capturedAt=ensure_utc(ev.captured_at),  # type: ignore[arg-type]
-        receivedAt=ensure_utc(ev.received_at),  # type: ignore[arg-type]
-        ackBy=ev.ack_by,
+        receivedAt=ensure_utc(ev.created_at),  # type: ignore[arg-type]
+        ackBy=resolved_ack_by,
         ackAt=ensure_utc(ev.ack_at),
         note=ev.note,
+        lat=ev.lat,
+        lng=ev.lng,
+        driverFeedback=ev.driver_feedback,
     )
 
 
@@ -161,7 +191,6 @@ def build_live_driver_state(
         .order_by(SessionModel.started_at.desc())
     )
 
-    # Also find most recent ended session if needed for lastHeartbeatAt
     last_session = active_session or db.scalar(
         select(SessionModel)
         .where(
@@ -173,18 +202,16 @@ def build_live_driver_state(
 
     day_start_utc, day_end_utc = vn_day_bounds_utc()
 
-    # Drowsiness events today in VN timezone
     drowsy_today = db.scalar(
         select(func.count(EventModel.id)).where(
             EventModel.driver_id == driver.id,
             EventModel.organization_id == driver.organization_id,
-            EventModel.type == "DROWSINESS",
-            EventModel.started_at >= day_start_utc,
-            EventModel.started_at <= day_end_utc,
+            EventModel.type.in_(("DROWSINESS", "DROWSY", "HEAD_DOWN")),
+            EventModel.occurred_at >= day_start_utc,
+            EventModel.occurred_at <= day_end_utc,
         )
     ) or 0
 
-    # Total driving sec today (ended sessions today + active session progress)
     ended_today_sec = db.scalar(
         select(func.coalesce(func.sum(SessionModel.total_driving_sec), 0)).where(
             SessionModel.driver_id == driver.id,
@@ -221,19 +248,22 @@ def build_live_driver_state(
                 LocationModel.driver_id == driver.id,
                 LocationModel.organization_id == driver.organization_id,
             )
-            .order_by(LocationModel.captured_at.desc(), LocationModel.id.desc())
+            .order_by(LocationModel.ts.desc(), LocationModel.id.desc())
         )
         if latest_loc is not None:
             loc_point = LocationPoint(
                 lat=latest_loc.lat,
                 lng=latest_loc.lng,
-                at=ensure_utc(latest_loc.captured_at),  # type: ignore[arg-type]
+                at=ensure_utc(latest_loc.ts),  # type: ignore[arg-type]
+                speedKmh=latest_loc.speed_kmh,
+                headingDeg=latest_loc.heading_deg,
+                eventId=latest_loc.event_id,
             )
 
     return LiveDriverState(
         driverId=driver.id,
         fullName=driver.full_name,
-        phone=driver.phone,
+        phone=driver.phone or "",
         vehicleName=v_name,
         state=state,  # type: ignore[arg-type]
         sessionId=session_id,
@@ -243,4 +273,3 @@ def build_live_driver_state(
         lastHeartbeatAt=last_hb,
         location=loc_point,
     )
-

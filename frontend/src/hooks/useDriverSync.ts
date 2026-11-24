@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AnalysisResult } from '../ai/driverAnalyzer';
 import { getServerUrl, setServerUrl as persistServerUrl } from '../config/env';
-import { isTransientSyncError, m3Api, M3ApiError } from '../services/m3Api';
+import { configureM3TokenRefresh, isTransientSyncError, m3Api, M3ApiError } from '../services/m3Api';
+import { registerDriverPushTokenIfAvailable } from '../services/pushNotifications';
 import {
   clearOfflineQueue,
   enqueueEvent,
@@ -15,10 +16,12 @@ import { DEFAULT_DRIVER_SETTINGS } from '../types/m3';
 import type {
   ContractState,
   DriverAuthSession,
+  DriverFeedbackValue,
   DriverMode,
   DriverSettings,
   EventLevel,
   HeartbeatLocation,
+  RestReminderPayload,
   UpsertEventRequest,
 } from '../types/m3';
 
@@ -41,6 +44,7 @@ interface ActiveEpisode {
   startedAt: string;
   startMs: number;
   level: EventLevel;
+  severityLevel: 1 | 2 | 3;
   state: ContractState;
   riskScore: number | null;
 }
@@ -130,9 +134,19 @@ function readOptionalLocation(): Promise<HeartbeatLocation | null> {
   return new Promise((resolve) => {
     navigator.geolocation.getCurrentPosition(
       (pos) => {
+        const rawSpeed = pos.coords.speed;
+        const rawHeading = pos.coords.heading;
         resolve({
           lat: pos.coords.latitude,
           lng: pos.coords.longitude,
+          speedKmh:
+            typeof rawSpeed === 'number' && Number.isFinite(rawSpeed) && rawSpeed >= 0
+              ? Math.round(rawSpeed * 3.6 * 10) / 10
+              : null,
+          headingDeg:
+            typeof rawHeading === 'number' && Number.isFinite(rawHeading) && rawHeading >= 0
+              ? Math.round(rawHeading * 10) / 10
+              : null,
           at: new Date(pos.timestamp || Date.now()).toISOString(),
         });
       },
@@ -146,6 +160,11 @@ function toContractState(result: AnalysisResult | null): ContractState {
   if (!result) return 'NORMAL';
   if (result.state === 'NOT_EVALUATED') return 'MONITORING_UNAVAILABLE';
   return result.state;
+}
+
+function hasDriverConsent(auth: DriverAuthSession | null): boolean {
+  if (!auth) return false;
+  return Boolean(auth.user.hasConsented || auth.consentedAt);
 }
 
 export function useDriverSync() {
@@ -162,6 +181,8 @@ export function useDriverSync() {
   });
   const [syncError, setSyncError] = useState<string | null>(null);
   const [settings, setSettings] = useState<DriverSettings>(DEFAULT_DRIVER_SETTINGS);
+  const [restReminder, setRestReminder] = useState<RestReminderPayload | null>(null);
+  const [lastAlertEvent, setLastAlertEvent] = useState<{ sessionId: string; eventId: string } | null>(null);
 
   const authRef = useRef(auth);
   const modeRef = useRef(mode);
@@ -169,12 +190,27 @@ export function useDriverSync() {
   const sessionRef = useRef<ActiveSessionState | null>(null);
   const latestStateRef = useRef<ContractState>('NORMAL');
   const latestQualityRef = useRef<ImageQuality>('GOOD');
+  const latestLocationRef = useRef<HeartbeatLocation | null>(null);
   const tickTimerRef = useRef<number | null>(null);
   const heartbeatTimerRef = useRef<number | null>(null);
+  const locationTimerRef = useRef<number | null>(null);
   const initialHeartbeatTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     authRef.current = auth;
+    configureM3TokenRefresh(auth?.refreshToken ?? null, (rotated) => {
+      const prev = authRef.current;
+      if (!prev) return;
+      const updated: DriverAuthSession = {
+        ...prev,
+        accessToken: rotated.accessToken,
+        refreshToken: rotated.refreshToken ?? prev.refreshToken,
+        user: rotated.user ?? prev.user,
+      };
+      authRef.current = updated;
+      setAuth(updated);
+      writeStoredAuth(updated);
+    });
   }, [auth]);
 
   useEffect(() => {
@@ -228,7 +264,7 @@ export function useDriverSync() {
   const flushNow = useCallback(async () => {
     const currentAuth = authRef.current;
     const url = serverUrlRef.current;
-    if (!currentAuth?.accessToken || !url) {
+    if (!currentAuth?.accessToken || !url || !hasDriverConsent(currentAuth) || currentAuth.user.mustChangePassword) {
       refreshPendingCount();
       return;
     }
@@ -273,9 +309,11 @@ export function useDriverSync() {
 
       const nextAuth: DriverAuthSession = {
         accessToken: res.accessToken,
+        refreshToken: res.refreshToken,
         user: res.user,
       };
       authRef.current = nextAuth;
+      configureM3TokenRefresh(res.refreshToken ?? null);
       setAuth(nextAuth);
       writeStoredAuth(nextAuth);
 
@@ -287,6 +325,7 @@ export function useDriverSync() {
       setHealthError(null);
       setSyncStatus('ready');
       setSyncError(null);
+      void registerDriverPushTokenIfAvailable(res.accessToken, targetUrl);
       void flushNow();
       return nextAuth;
     },
@@ -301,9 +340,11 @@ export function useDriverSync() {
     const res = await m3Api.pairVehicle(currentAuth.accessToken, code.trim().toUpperCase(), serverUrlRef.current);
     const updated: DriverAuthSession = {
       ...currentAuth,
+      user: { ...currentAuth.user, hasConsented: true },
       vehicleName: res.vehicleName,
       organizationName: res.organizationName,
       consentedAt: new Date().toISOString(),
+      consentVersion: '2026-01',
     };
     authRef.current = updated;
     setAuth(updated);
@@ -311,7 +352,62 @@ export function useDriverSync() {
     return updated;
   }, []);
 
+  const acceptConsent = useCallback(async (locationConsent: boolean): Promise<DriverAuthSession> => {
+    const currentAuth = authRef.current;
+    if (!currentAuth) {
+      throw new M3ApiError('Cần đăng nhập trước khi xác nhận đồng ý.', 401, 'UNAUTHORIZED');
+    }
+    const res = await m3Api.acceptConsent(
+      currentAuth.accessToken,
+      locationConsent,
+      '2026-01',
+      serverUrlRef.current,
+    );
+    const updated: DriverAuthSession = {
+      ...currentAuth,
+      user: { ...currentAuth.user, hasConsented: true },
+      consentedAt: res.acceptedAt ?? new Date().toISOString(),
+      consentVersion: res.version,
+      locationConsent: res.locationConsent,
+    };
+    authRef.current = updated;
+    setAuth(updated);
+    writeStoredAuth(updated);
+    setSyncError(null);
+    return updated;
+  }, []);
+
+  const changePassword = useCallback(
+    async (currentPassword: string, newPassword: string): Promise<DriverAuthSession> => {
+      const currentAuth = authRef.current;
+      if (!currentAuth) {
+        throw new M3ApiError('Cần đăng nhập trước khi đổi mật khẩu.', 401, 'UNAUTHORIZED');
+      }
+      const updatedUser = await m3Api.changePassword(
+        currentAuth.accessToken,
+        currentPassword,
+        newPassword,
+        serverUrlRef.current,
+      );
+      const updated: DriverAuthSession = {
+        ...currentAuth,
+        user: updatedUser,
+      };
+      authRef.current = updated;
+      setAuth(updated);
+      writeStoredAuth(updated);
+      setSyncError(null);
+      return updated;
+    },
+    [],
+  );
+
   const logout = useCallback(() => {
+    const cur = authRef.current;
+    if (cur?.accessToken && serverUrlRef.current) {
+      void m3Api.logout(cur.accessToken, cur.refreshToken, serverUrlRef.current).catch(() => undefined);
+    }
+    configureM3TokenRefresh(null);
     authRef.current = null;
     setAuth(null);
     writeStoredAuth(null);
@@ -329,9 +425,43 @@ export function useDriverSync() {
       window.clearInterval(heartbeatTimerRef.current);
       heartbeatTimerRef.current = null;
     }
+    if (locationTimerRef.current !== null) {
+      window.clearInterval(locationTimerRef.current);
+      locationTimerRef.current = null;
+    }
     if (initialHeartbeatTimerRef.current !== null) {
       window.clearTimeout(initialHeartbeatTimerRef.current);
       initialHeartbeatTimerRef.current = null;
+    }
+  }, []);
+
+  const sendLocationSample = useCallback(async () => {
+    const sess = sessionRef.current;
+    const currentAuth = authRef.current;
+    const url = serverUrlRef.current;
+    if (!sess || !currentAuth || modeRef.current !== 'online' || !url) return;
+    if (!hasDriverConsent(currentAuth) || currentAuth.user.mustChangePassword) return;
+    if (!sess.settings.shareLocation || currentAuth.locationConsent === false) return;
+
+    const loc = await readOptionalLocation();
+    if (!loc) return;
+    latestLocationRef.current = loc;
+
+    try {
+      await m3Api.postLocations(
+        currentAuth.accessToken,
+        sess.sessionId,
+        {
+          lat: loc.lat,
+          lng: loc.lng,
+          speedKmh: loc.speedKmh ?? null,
+          headingDeg: loc.headingDeg ?? null,
+          at: loc.at ?? new Date().toISOString(),
+        },
+        url,
+      );
+    } catch {
+      // Bỏ qua lỗi mạng tạm thời khi gửi tọa độ định kỳ (tiết kiệm pin)
     }
   }, []);
 
@@ -340,12 +470,17 @@ export function useDriverSync() {
     const currentAuth = authRef.current;
     const url = serverUrlRef.current;
     if (!sess || !currentAuth || modeRef.current !== 'online' || !url) return;
+    if (!hasDriverConsent(currentAuth) || currentAuth.user.mustChangePassword) return;
 
     const elapsedSec = Math.max(0, Math.floor((Date.now() - sess.startMs) / 1000));
-    const location = sess.settings.shareLocation ? await readOptionalLocation() : null;
+    const allowLoc = sess.settings.shareLocation && currentAuth.locationConsent !== false;
+    const location = allowLoc ? await readOptionalLocation() : null;
+    if (location) {
+      latestLocationRef.current = location;
+    }
 
     try {
-      await m3Api.postHeartbeat(
+      const hbRes = await m3Api.postHeartbeat(
         currentAuth.accessToken,
         sess.sessionId,
         {
@@ -358,6 +493,11 @@ export function useDriverSync() {
         },
         url,
       );
+      if (hbRes.settings && sessionRef.current?.sessionId === sess.sessionId) {
+        sess.settings = hbRes.settings;
+        setSettings(hbRes.settings);
+      }
+      setRestReminder(hbRes.restReminder ?? null);
       if (loadOfflineQueue().length > 0) {
         void flushNow();
       } else {
@@ -385,7 +525,23 @@ export function useDriverSync() {
 
   const queueAndFlushEvent = useCallback(
     (sess: ActiveSessionState, event: UpsertEventRequest) => {
-      enqueueEvent(sess.sessionId, sess.startedAt, event);
+      const currentAuth = authRef.current;
+      if (!hasDriverConsent(currentAuth) || currentAuth?.user.mustChangePassword) {
+        return;
+      }
+      const allowLoc = sess.settings.shareLocation && currentAuth?.locationConsent !== false;
+      const loc = allowLoc ? latestLocationRef.current : null;
+      const enriched: UpsertEventRequest = loc
+        ? {
+            ...event,
+            lat: event.lat ?? loc.lat,
+            lng: event.lng ?? loc.lng,
+            speedKmh: event.speedKmh ?? loc.speedKmh ?? null,
+            headingDeg: event.headingDeg ?? loc.headingDeg ?? null,
+          }
+        : event;
+      enqueueEvent(sess.sessionId, sess.startedAt, enriched);
+      setLastAlertEvent({ sessionId: sess.sessionId, eventId: enriched.eventId });
       refreshPendingCount();
       void flushNow();
     },
@@ -399,6 +555,7 @@ export function useDriverSync() {
         eventId: episode.eventId,
         type: 'DROWSINESS',
         level: episode.level,
+        severityLevel: episode.severityLevel,
         status: 'CLOSED',
         state: episode.state,
         riskScore: episode.riskScore,
@@ -423,6 +580,21 @@ export function useDriverSync() {
     [sendHeartbeat],
   );
 
+  const scheduleLocationInterval = useCallback(
+    (shareLocation: boolean, locationIntervalSec: number) => {
+      if (locationTimerRef.current !== null) {
+        window.clearInterval(locationTimerRef.current);
+        locationTimerRef.current = null;
+      }
+      if (!shareLocation) return;
+      const ms = Math.max(5, locationIntervalSec) * 1000;
+      locationTimerRef.current = window.setInterval(() => {
+        void sendLocationSample();
+      }, ms);
+    },
+    [sendLocationSample],
+  );
+
   const startSession = useCallback(async () => {
     clearTimers();
     latestStateRef.current = 'NORMAL';
@@ -430,7 +602,13 @@ export function useDriverSync() {
 
     const currentAuth = authRef.current;
     const url = serverUrlRef.current;
-    if (modeRef.current !== 'online' || !currentAuth?.accessToken || !url) {
+    if (
+      modeRef.current !== 'online' ||
+      !currentAuth?.accessToken ||
+      !url ||
+      !hasDriverConsent(currentAuth) ||
+      currentAuth.user.mustChangePassword
+    ) {
       sessionRef.current = null;
       return;
     }
@@ -476,6 +654,10 @@ export function useDriverSync() {
     }
 
     scheduleHeartbeatInterval(sess.settings.heartbeatIntervalSec);
+    scheduleLocationInterval(
+      sess.settings.shareLocation,
+      sess.settings.locationIntervalSec ?? sess.settings.heartbeatIntervalSec,
+    );
     initialHeartbeatTimerRef.current = window.setTimeout(() => {
       void sendHeartbeat();
     }, 1500);
@@ -532,7 +714,7 @@ export function useDriverSync() {
         });
       }
     }, 1000);
-  }, [clearTimers, queueAndFlushEvent, refreshPendingCount, scheduleHeartbeatInterval, sendHeartbeat]);
+  }, [clearTimers, queueAndFlushEvent, refreshPendingCount, scheduleHeartbeatInterval, scheduleLocationInterval, sendHeartbeat]);
 
   const reportAIState = useCallback(
     (result: AnalysisResult | null, isMonitoring: boolean) => {
@@ -553,6 +735,8 @@ export function useDriverSync() {
           closeEpisode(sess, sess.distractedEpisode, nowMs);
           sess.distractedEpisode = null;
         }
+        const sev: 1 | 2 = result?.severityLevel === 2 ? 2 : 1;
+        const risk = sev === 2 ? 0.8 : 0.55;
         if (!sess.drowsyEpisode) {
           const eventId = generateUuid();
           sess.warningCount += 1;
@@ -561,18 +745,36 @@ export function useDriverSync() {
             startedAt: nowIso,
             startMs: nowMs,
             level: 'WARNING',
+            severityLevel: sev,
             state: 'DROWSINESS_SIGNS',
-            riskScore: 0.8,
+            riskScore: risk,
           };
           queueAndFlushEvent(sess, {
             eventId,
             type: 'DROWSINESS',
             level: 'WARNING',
+            severityLevel: sev,
             status: 'OPEN',
             state: 'DROWSINESS_SIGNS',
-            riskScore: 0.8,
+            riskScore: risk,
             startedAt: nowIso,
-            durationSec: 1,
+            durationSec: sev,
+            capturedAt: nowIso,
+          });
+        } else if (sev > sess.drowsyEpisode.severityLevel) {
+          sess.drowsyEpisode.severityLevel = sev;
+          sess.drowsyEpisode.riskScore = risk;
+          const durationSec = Math.max(sev, Math.round((nowMs - sess.drowsyEpisode.startMs) / 1000));
+          queueAndFlushEvent(sess, {
+            eventId: sess.drowsyEpisode.eventId,
+            type: 'DROWSINESS',
+            level: 'WARNING',
+            severityLevel: sev,
+            status: 'OPEN',
+            state: 'DROWSINESS_SIGNS',
+            riskScore: risk,
+            startedAt: sess.drowsyEpisode.startedAt,
+            durationSec,
             capturedAt: nowIso,
           });
         }
@@ -582,10 +784,11 @@ export function useDriverSync() {
           sess.distractedEpisode = null;
         }
         if (sess.drowsyEpisode) {
-          if (sess.drowsyEpisode.level !== 'CRITICAL') {
+          if (sess.drowsyEpisode.level !== 'CRITICAL' || sess.drowsyEpisode.severityLevel < 3) {
             sess.warningCount = Math.max(0, sess.warningCount - 1);
             sess.criticalCount += 1;
             sess.drowsyEpisode.level = 'CRITICAL';
+            sess.drowsyEpisode.severityLevel = 3;
             sess.drowsyEpisode.state = 'CRITICAL';
             sess.drowsyEpisode.riskScore = 0.95;
             const durationSec = Math.max(2, Math.round((nowMs - sess.drowsyEpisode.startMs) / 1000));
@@ -593,6 +796,7 @@ export function useDriverSync() {
               eventId: sess.drowsyEpisode.eventId,
               type: 'DROWSINESS',
               level: 'CRITICAL',
+              severityLevel: 3,
               status: 'ESCALATED',
               state: 'CRITICAL',
               riskScore: 0.95,
@@ -609,6 +813,7 @@ export function useDriverSync() {
             startedAt: nowIso,
             startMs: nowMs,
             level: 'CRITICAL',
+            severityLevel: 3,
             state: 'CRITICAL',
             riskScore: 0.95,
           };
@@ -616,11 +821,12 @@ export function useDriverSync() {
             eventId,
             type: 'DROWSINESS',
             level: 'CRITICAL',
+            severityLevel: 3,
             status: 'ESCALATED',
             state: 'CRITICAL',
             riskScore: 0.95,
             startedAt: nowIso,
-            durationSec: 2,
+            durationSec: 4,
             capturedAt: nowIso,
           });
         }
@@ -629,6 +835,7 @@ export function useDriverSync() {
           closeEpisode(sess, sess.drowsyEpisode, nowMs);
           sess.drowsyEpisode = null;
         }
+        const distSev: 1 | 2 = result?.severityLevel === 2 ? 2 : 1;
         if (!sess.distractedEpisode) {
           const eventId = generateUuid();
           sess.warningCount += 1;
@@ -637,6 +844,7 @@ export function useDriverSync() {
             startedAt: nowIso,
             startMs: nowMs,
             level: 'WARNING',
+            severityLevel: distSev,
             state: 'DISTRACTED',
             riskScore: 0.65,
           };
@@ -644,6 +852,7 @@ export function useDriverSync() {
             eventId,
             type: 'DROWSINESS',
             level: 'WARNING',
+            severityLevel: distSev,
             status: 'OPEN',
             state: 'DISTRACTED',
             riskScore: 0.65,
@@ -690,11 +899,32 @@ export function useDriverSync() {
         warningCount: sess.warningCount,
         criticalCount: sess.criticalCount,
         unavailableSec: sess.unavailableSec,
+        monitoringOffCount: 1,
       },
     });
     refreshPendingCount();
     await flushNow();
   }, [clearTimers, closeEpisode, flushNow, refreshPendingCount]);
+
+  const submitEventFeedback = useCallback(async (feedback: DriverFeedbackValue): Promise<void> => {
+    const target = lastAlertEvent;
+    setLastAlertEvent(null);
+    const currentAuth = authRef.current;
+    const url = serverUrlRef.current;
+    if (!target || !currentAuth?.accessToken || !url || modeRef.current !== 'online') return;
+    try {
+      await flushNow();
+      await m3Api.postEventFeedback(
+        currentAuth.accessToken,
+        target.sessionId,
+        target.eventId,
+        feedback,
+        url,
+      );
+    } catch {
+      // Bỏ qua nếu đang ngoại tuyến
+    }
+  }, [flushNow, lastAlertEvent]);
 
   // Kiểm tra token khi mở app và tự động flush hàng đợi offline khi có mạng lại
   useEffect(() => {
@@ -751,9 +981,14 @@ export function useDriverSync() {
     syncStatus,
     syncError,
     settings,
+    restReminder,
+    lastAlertEvent,
+    submitEventFeedback,
     saveAndTestServer,
     login,
     pairVehicle,
+    acceptConsent,
+    changePassword,
     logout,
     flushNow,
     startSession,

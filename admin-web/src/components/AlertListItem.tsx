@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
-import { AlertTriangle, BellRing, Check, Clock3, MessageCircle, Phone, RadioTower, WifiOff, X } from 'lucide-react';
+import { AlertTriangle, BellRing, Check, Clock3, MapPin, MessageCircle, Phone, RadioTower, WifiOff, X } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { useFeed } from '../hooks/useLiveFeed';
 import { errorMessage } from '../hooks/useResource';
@@ -91,6 +91,16 @@ export function AlertListItem({ alert }: { alert: AlertEvent }) {
           {critical ? <RadioTower size={12} aria-hidden /> : <AlertTriangle size={12} aria-hidden />}
           {critical ? 'Nguy hiểm' : 'Cảnh báo'}
         </span>
+        {alert.lat != null && alert.lng != null && (
+          <p className="mt-1 text-xs">
+            <Link
+              className="inline-flex items-center gap-1 font-medium text-emerald-700 hover:underline"
+              to={`/map?driverId=${encodeURIComponent(alert.driverId)}&eventId=${encodeURIComponent(alert.id)}`}
+            >
+              <MapPin size={12} aria-hidden /> Xem điểm trên bản đồ
+            </Link>
+          </p>
+        )}
         {normalizedPhone && (
           <div className="alert-quick-contact">
             <a className="button button-primary button-small" href={`tel:${normalizedPhone}`}>

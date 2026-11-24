@@ -1,4 +1,4 @@
-import { Activity, BarChart3, ChevronRight, CircleHelp, Clock3, FlaskConical, History, LogOut, Menu, Settings2, ShieldCheck, UsersRound, X } from 'lucide-react';
+import { Activity, BarChart3, ChevronRight, CircleHelp, Clock3, FlaskConical, History, LogOut, MapPin, Menu, Settings2, ShieldCheck, UsersRound, X } from 'lucide-react';
 import { Suspense, useEffect, useRef } from 'react';
 import { Link, NavLink, Outlet, useLocation } from 'react-router-dom';
 import { isMock } from '../api';
@@ -12,6 +12,7 @@ import { Avatar, Loading } from './ui';
 
 const navigation = [
   { to: '/', label: 'Giám sát trực tiếp', icon: Activity },
+  { to: '/map', label: 'Bản đồ hành trình', icon: MapPin },
   { to: '/history', label: 'Lịch sử cảnh báo', icon: History },
   { to: '/drivers', label: 'Danh sách tài xế', icon: UsersRound },
   { to: '/stats', label: 'Thống kê', icon: BarChart3 },

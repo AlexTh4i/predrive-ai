@@ -2,7 +2,7 @@ import { ChevronDown } from 'lucide-react';
 import { memo } from 'react';
 import { Bar, BarChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { formatNumber } from '../lib/format';
-import type { HourlyStats } from '../types';
+import type { DriverUsage7d, HourlyStats } from '../types';
 import { Empty } from './ui';
 
 const hourLabel = (hour: number) => `${String(hour).padStart(2, '0')}:00`;
@@ -68,6 +68,36 @@ export const TrendChart = memo(function TrendChart({ data }: { data: { label: st
       <details className="chart-details"><summary>Xem số liệu xu hướng <ChevronDown size={15} aria-hidden /></summary>
         <div className="hour-values">{data.map(({ label, count }) => <span key={label}><strong>{label}</strong> {formatNumber(count)}</span>)}</div>
       </details>
+    </>
+  );
+});
+
+export const AlarmFatigueChart = memo(function AlarmFatigueChart({ data }: { data: DriverUsage7d[] }) {
+  if (!data.length) {
+    return <Empty title="Chưa có dữ liệu sử dụng ứng dụng 7 ngày" description="Biểu đồ sẽ hiển thị khi có phiên lái được ghi nhận." />;
+  }
+  const rows = data.map((item) => ({
+    ...item,
+    shortName: item.fullName.split(/\s+/).slice(-2).join(' '),
+  }));
+  return (
+    <>
+      <div className="chart-legend">
+        <span><i className="chart-warning" /> Tắt giám sát / giờ lái</span>
+        <span><i className="chart-critical" /> % cảnh báo sai</span>
+      </div>
+      <div className="chart-frame" aria-label="Biểu đồ tỉ lệ tắt giám sát và phần trăm cảnh báo sai theo tài xế">
+        <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
+          <BarChart data={rows} margin={{ top: 10, right: 12, bottom: 4, left: 0 }}>
+            <CartesianGrid vertical={false} stroke="var(--border)" strokeDasharray="3 4" />
+            <XAxis dataKey="shortName" tick={axis} tickLine={false} axisLine={false} interval={0} minTickGap={6} />
+            <YAxis tick={axis} width={36} tickLine={false} axisLine={false} />
+            <Tooltip labelStyle={tooltipLabel} contentStyle={tooltipStyle} itemStyle={{ color: 'var(--text)' }} />
+            <Bar dataKey="offPerHour" name="Tắt giám sát / giờ" fill="var(--amber)" maxBarSize={22} radius={[4, 4, 0, 0]} isAnimationActive={false} />
+            <Bar dataKey="falseAlertPct" name="% cảnh báo sai" fill="var(--red)" maxBarSize={22} radius={[4, 4, 0, 0]} isAnimationActive={false} />
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
     </>
   );
 });

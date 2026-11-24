@@ -205,3 +205,27 @@ test('bảy màn hình vừa khung ở 320, 375, 390, 768, 1366 và 1920 px', as
   await page.getByRole('link', { name: 'Cảnh báo', exact: true }).click();
   await expect(page.locator('#recent-alerts')).toBeFocused();
 });
+
+test('bản đồ hành trình hiển thị xe trực tiếp, vệt tuyến đường và điểm cảnh báo gắn eventId', async ({ page }) => {
+  const transparentPng = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=',
+    'base64',
+  );
+  await page.route('https://*.tile.openstreetmap.org/**', (route) =>
+    route.fulfill({ status: 200, contentType: 'image/png', body: transparentPng }),
+  );
+
+  await page.goto('/map');
+  await login(page);
+  await expect(page).toHaveURL(/\/map/);
+  await expect(page.getByTestId('fleet-leaflet-map')).toBeVisible();
+  await expect(page.getByText(/Đang theo dõi 6 xe/)).toBeVisible();
+  const alertButtons = page.getByTestId('trail-alert-list').getByRole('button');
+  await expect(alertButtons.first()).toBeVisible();
+  await alertButtons.first().click();
+  await expect(page).toHaveURL(/eventId=/);
+  await expect(page.locator('.leaflet-popup-content').first()).toBeVisible();
+
+  await page.setViewportSize({ width: 320, height: 740 });
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
+});

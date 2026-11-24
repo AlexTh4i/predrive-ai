@@ -11,8 +11,8 @@ import time
 from typing import Any
 from uuid import UUID, uuid4
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse, PlainTextResponse
 from PIL import Image, UnidentifiedImageError
 from pydantic import ValidationError
 from sqlalchemy import select
@@ -41,9 +41,17 @@ from .core.errors import register_error_handlers
 from .models.models import Organization
 from .routers import auth as auth_router
 from .routers import driver_app as driver_app_router
+from .routers import public_api as public_api_router
 from .routers import web_admin as web_admin_router
 from .schemas import AnalysisResult, FrameMessage, SessionResponse
+from .services.observability import (
+    init_sentry_if_configured,
+    record_http_metric,
+    render_prometheus_metrics,
+)
+from .services.rate_limiter import rate_limiter
 from .services.seed import seed_database
+from .services.sse import sse_broker
 from .services.watchdog import watchdog_loop
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -95,15 +103,18 @@ driver_app_router.set_legacy_session_creator(_create_legacy_ws_session)
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global ai_analyzer
-    # 1. Initialize database schema & seed if empty
+    # 1. Initialize database schema & seed if empty (NEVER seed in production - R5 / P0-4)
+    rate_limiter.reset()
+    init_sentry_if_configured()
+    cfg = get_config()
     db_mod.Base.metadata.create_all(bind=db_mod.engine)
-    if os.getenv("PREDRIVE_AUTO_SEED", "1") == "1":
+    if not cfg.is_production and os.getenv("PREDRIVE_AUTO_SEED", "1") == "1":
         with db_mod.SessionLocal() as db:
             has_org = db.scalar(select(Organization.id).limit(1))
             if has_org is None:
-                logger.info("Database trống — đang chạy seed dữ liệu mẫu M3...")
+                logger.info("Database trống — đang chạy seed dữ liệu mẫu dev...")
                 seed_database(db)
-                logger.info("Đã hoàn tất seed dữ liệu mẫu M3.")
+                logger.info("Đã hoàn tất seed dữ liệu mẫu dev.")
 
     # 2. Initialize AI Model for M1/M2 WebSocket gateway (optional in M3-only mode)
     enable_legacy_ai = os.getenv("PREDRIVE_ENABLE_LEGACY_AI", "1") == "1"
@@ -121,7 +132,8 @@ async def lifespan(_: FastAPI):
                 _LEGACY_AI_IMPORT_ERROR,
             )
 
-    # 3. Start background watchdog task for M3 session heartbeat monitoring
+    # 3. Start Redis SSE Pub/Sub listener (if REDIS_URL is configured) & background watchdog
+    sse_broker.start_redis_listener()
     stop_event = asyncio.Event()
     watchdog_task: asyncio.Task[None] | None = None
     if get_config().enable_watchdog:
@@ -131,6 +143,7 @@ async def lifespan(_: FastAPI):
         yield
     finally:
         stop_event.set()
+        sse_broker.stop_redis_listener()
         if watchdog_task is not None:
             watchdog_task.cancel()
             try:
@@ -141,41 +154,141 @@ async def lifespan(_: FastAPI):
         active_sessions.clear()
 
 
+_boot_cfg = get_config()
 app = FastAPI(
-    title="PREDRIVE AI Gateway & Fleet Backend (M3)",
-    version="0.3.0",
+    title="PREDRIVE AI Gateway & Fleet Backend",
+    version="0.4.0",
     lifespan=lifespan,
+    docs_url=None if _boot_cfg.is_production else "/docs",
+    redoc_url=None if _boot_cfg.is_production else "/redoc",
+    openapi_url=None if _boot_cfg.is_production else "/openapi.json",
 )
 
 register_error_handlers(app)
 
-origins = [
-    o.strip()
-    for o in os.getenv(
-        "PREDRIVE_ALLOWED_ORIGINS",
-        "http://localhost:5173,https://localhost:5173,http://127.0.0.1:5173,"
-        "http://localhost:5174,http://127.0.0.1:5174,http://localhost:4174,http://127.0.0.1:4174,"
-        "https://localhost,http://localhost,capacitor://localhost",
-    ).split(",")
-    if o.strip()
-]
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization"],
-)
+_DOCS_PATHS = {"/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json"}
 
-# Mount M3 API routers
+
+def _apply_security_and_cors_headers(
+    response: Response, origin: str | None, allowed_origins: list[str], is_prod: bool
+) -> Response:
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault(
+        "Permissions-Policy", "camera=(), microphone=(), geolocation=()"
+    )
+    if is_prod:
+        response.headers.setdefault(
+            "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
+        )
+        response.headers.setdefault(
+            "Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'"
+        )
+    if origin and origin in allowed_origins:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Vary"] = "Origin"
+    return response
+
+
+@app.middleware("http")
+async def production_security_middleware(request: Request, call_next):
+    cfg = get_config()
+    origin = request.headers.get("origin")
+
+    # 1. Disable public Swagger / OpenAPI docs in production (R5 / P1-6)
+    if cfg.is_production and request.url.path in _DOCS_PATHS:
+        resp = JSONResponse(
+            status_code=404,
+            content={"error": {"code": "NOT_FOUND", "message": "Not Found"}},
+        )
+        return _apply_security_and_cors_headers(
+            resp, origin, cfg.cors_origins, cfg.is_production
+        )
+
+    # 2. Dynamic CORS preflight strictly bound to CORS_ORIGINS
+    if request.method == "OPTIONS" and "access-control-request-method" in request.headers:
+        if origin and origin in cfg.cors_origins:
+            preflight = PlainTextResponse("OK", status_code=200)
+            preflight.headers["Access-Control-Allow-Methods"] = (
+                "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+            )
+            preflight.headers["Access-Control-Allow-Headers"] = (
+                "Content-Type, Authorization, X-API-Key"
+            )
+            preflight.headers["Access-Control-Max-Age"] = "600"
+            return _apply_security_and_cors_headers(
+                preflight, origin, cfg.cors_origins, cfg.is_production
+            )
+        disallowed = PlainTextResponse("Disallowed CORS origin", status_code=400)
+        return _apply_security_and_cors_headers(
+            disallowed, None, cfg.cors_origins, cfg.is_production
+        )
+
+    # 3. Request body size limit (P1-6)
+    max_bytes = cfg.max_body_bytes
+    cl_header = request.headers.get("content-length")
+    if cl_header:
+        try:
+            if int(cl_header) > max_bytes:
+                too_large = JSONResponse(
+                    status_code=413,
+                    content={
+                        "error": {
+                            "code": "PAYLOAD_TOO_LARGE",
+                            "message": f"Request body exceeds limit ({max_bytes} bytes)",
+                        }
+                    },
+                )
+                return _apply_security_and_cors_headers(
+                    too_large, origin, cfg.cors_origins, cfg.is_production
+                )
+        except ValueError:
+            pass
+
+    if request.method in ("POST", "PUT", "PATCH"):
+        body_bytes = await request.body()
+        if len(body_bytes) > max_bytes:
+            too_large = JSONResponse(
+                status_code=413,
+                content={
+                    "error": {
+                        "code": "PAYLOAD_TOO_LARGE",
+                        "message": f"Request body exceeds limit ({max_bytes} bytes)",
+                    }
+                },
+            )
+            return _apply_security_and_cors_headers(
+                too_large, origin, cfg.cors_origins, cfg.is_production
+            )
+
+    t_start = time.perf_counter()
+    response = await call_next(request)
+    elapsed = time.perf_counter() - t_start
+    route_obj = request.scope.get("route")
+    route_label = getattr(route_obj, "path", request.url.path)
+    record_http_metric(request.method, route_label, response.status_code, elapsed)
+    return _apply_security_and_cors_headers(
+        response, origin, cfg.cors_origins, cfg.is_production
+    )
+
+# Mount M3 & Public Integration API routers
 app.include_router(auth_router.router)
 app.include_router(driver_app_router.router)
 app.include_router(web_admin_router.router)
+app.include_router(public_api_router.router)
 
 
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok", "service": "predrive-backend", "version": "0.1.0"}
+
+
+@app.get("/metrics", include_in_schema=False)
+async def metrics() -> Response:
+    payload, content_type = render_prometheus_metrics()
+    return Response(content=payload, media_type=content_type)
 
 
 def decode_jpeg(encoded: str) -> tuple[bytes, tuple[int, int]]:
